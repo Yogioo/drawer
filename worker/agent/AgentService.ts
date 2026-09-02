@@ -1,3 +1,8 @@
+import {
+	boundCanvasSelectedElementIds,
+	boundCanvasHistory,
+	selectCanvasContextElements,
+} from '../../shared/canvas.ts'
 import type {
 	CanvasAgentAction,
 	CanvasAgentErrorCode,
@@ -517,7 +522,17 @@ export function validateCanvasPrompt(value: unknown): CanvasPrompt {
 	) {
 		throw new AgentBoundaryError('client', '对话历史无效。')
 	}
-	return value as unknown as CanvasPrompt
+	const selectedElementIds = boundCanvasSelectedElementIds(value.selectedElementIds as string[])
+	const elements = value.elements as CanvasElementSummary[]
+	const history = value.history as CanvasPrompt['history']
+	const validViewport = viewport as unknown as CanvasPrompt['viewport']
+	return {
+		message: value.message,
+		elements: selectCanvasContextElements(elements, selectedElementIds, validViewport),
+		selectedElementIds,
+		viewport: validViewport,
+		history: boundCanvasHistory(history),
+	}
 }
 
 function isCanvasElementSummary(value: unknown): value is CanvasElementSummary {

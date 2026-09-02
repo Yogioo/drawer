@@ -1,5 +1,12 @@
 import type { AppState } from '@excalidraw/excalidraw/types'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
+import {
+	boundCanvasSelectedElementIds,
+	boundCanvasHistory,
+	intersectsCanvasViewport,
+	MAX_CANVAS_CONTEXT_POINTS,
+	selectCanvasContextElements,
+} from '../shared/canvas.ts'
 import type {
 	CanvasAgentAction,
 	CanvasAgentErrorCode,
@@ -32,21 +39,32 @@ export function createCanvasPrompt(
 	history: readonly ChatEntry[]
 ): CanvasPrompt {
 	const visibleElements = elements.filter((element) => !element.isDeleted)
+	const selectedElementIds = boundCanvasSelectedElementIds(
+		Object.entries(appState.selectedElementIds)
+			.filter(([, selected]) => selected)
+			.map(([id]) => id)
+	)
+	const viewport = getViewport(appState)
+	const selected = new Set(selectedElementIds)
+	const contextCandidates = visibleElements.filter(
+		(element) => selected.has(element.id) || intersectsCanvasViewport(element, viewport)
+	)
+	const summaries = contextCandidates
+		.map(toSummary)
+		.filter((summary): summary is CanvasElementSummary => !!summary)
 	return {
 		message,
-		elements: visibleElements.map(toSummary).filter((summary): summary is CanvasElementSummary => !!summary),
-		selectedElementIds: Object.entries(appState.selectedElementIds)
-			.filter(([, selected]) => selected)
-			.map(([id]) => id),
-		viewport: getViewport(appState),
-		history: history.slice(-12),
+		elements: selectCanvasContextElements(summaries, selectedElementIds, viewport),
+		selectedElementIds,
+		viewport,
+		history: boundCanvasHistory(history),
 	}
 }
 
 export async function streamCanvasAgent(
 	prompt: CanvasPrompt,
 	signal: AbortSignal,
-	onAction: (action: CanvasAgentAction) => void
+	onAction: (action: CanvasAgentAction) => void | Promise<void>
 ): Promise<void> {
 	let response: Response
 	try {
@@ -76,11 +94,11 @@ export async function streamCanvasAgent(
 			const events = buffer.split(/\r?\n\r?\n/)
 			buffer = events.pop() ?? ''
 
-			for (const event of events) completed = consumeEvent(event, onAction) || completed
+			for (const event of events) completed = (await consumeEvent(event, onAction)) || completed
 			if (done) break
 		}
 
-		if (buffer.trim()) completed = consumeEvent(buffer, onAction) || completed
+		if (buffer.trim()) completed = (await consumeEvent(buffer, onAction)) || completed
 		if (!completed) throw new CanvasAgentClientError('network', 'AI Worker 连接意外关闭，请重试。', true)
 	} finally {
 		if (!completed) await reader.cancel().catch(() => undefined)
@@ -88,7 +106,10 @@ export async function streamCanvasAgent(
 	}
 }
 
-function consumeEvent(event: string, onAction: (action: CanvasAgentAction) => void): boolean {
+async function consumeEvent(
+	event: string,
+	onAction: (action: CanvasAgentAction) => void | Promise<void>
+): Promise<boolean> {
 	const lines = event.split(/\r?\n/)
 	const eventName = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() ?? ''
 	const data = lines
@@ -108,7 +129,7 @@ function consumeEvent(event: string, onAction: (action: CanvasAgentAction) => vo
 			throw new CanvasAgentClientError(parsed.code, parsed.message, parsed.retryable === true)
 		}
 		if ('error' in parsed) throw new CanvasAgentClientError('provider', parsed.error)
-		onAction(parsed as CanvasAgentAction)
+		await onAction(parsed as CanvasAgentAction)
 		return false
 	} catch (error) {
 		if (error instanceof CanvasAgentClientError) throw error
@@ -209,7 +230,11 @@ function toSummary(element: ExcalidrawElement): CanvasElementSummary | null {
 	}
 
 	if (element.type === 'text') summary.text = element.text
-	if ('points' in element) summary.points = element.points.slice(0, 80).map(([x, y]) => ({ x, y }))
+	if ('points' in element) {
+		summary.points = element.points
+			.slice(0, MAX_CANVAS_CONTEXT_POINTS)
+			.map(([x, y]) => ({ x, y }))
+	}
 	if ('containerId' in element && element.containerId) summary.text = summary.text || ''
 	return summary
 }
@@ -232,9 +257,14 @@ function getSupportedType(type: ExcalidrawElement['type']): CanvasElementSummary
 function getViewport(appState: AppState): CanvasViewport {
 	const zoom = appState.zoom.value || 1
 	return {
-		x: Math.round(-appState.scrollX / zoom),
-		y: Math.round(-appState.scrollY / zoom),
+		x: roundedCoordinate(-appState.scrollX / zoom),
+		y: roundedCoordinate(-appState.scrollY / zoom),
 		w: Math.round(appState.width / zoom),
 		h: Math.round(appState.height / zoom),
 	}
+}
+
+function roundedCoordinate(value: number): number {
+	const rounded = Math.round(value)
+	return rounded === 0 ? 0 : rounded
 }

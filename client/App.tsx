@@ -1,18 +1,18 @@
-import {
-	convertToExcalidrawElements,
-	Excalidraw,
-	} from '@excalidraw/excalidraw'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type {
 	AppState,
 	BinaryFiles,
 	ExcalidrawImperativeAPI,
 } from '@excalidraw/excalidraw/types'
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CanvasAgentAction, CanvasElementSpec } from '../shared/canvas'
 import { ChatEntry, createCanvasPrompt, streamCanvasAgent } from './agent'
+import { createScenePersistence, readPersistedScene } from './persistence'
 
 const STORAGE_KEY = 'drawer-excalidraw-scene'
+const ExcalidrawCanvas = lazy(() =>
+	import('@excalidraw/excalidraw').then(({ Excalidraw }) => ({ default: Excalidraw }))
+)
 
 function App() {
 	const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null)
@@ -25,32 +25,47 @@ function App() {
 	const controllerRef = useRef<AbortController | null>(null)
 
 	const initialData = useMemo(() => {
+		if (typeof window === 'undefined') return null
 		try {
-			const stored = localStorage.getItem(STORAGE_KEY)
-			return stored ? JSON.parse(stored) : null
+			const stored = readPersistedScene(window.localStorage, STORAGE_KEY)
+			return stored ? { elements: stored.elements as ExcalidrawElement[] } : null
 		} catch {
 			return null
 		}
 	}, [])
 
+	const scenePersistence = useMemo(() => {
+		if (typeof window === 'undefined') return null
+		return createScenePersistence(window.localStorage, STORAGE_KEY)
+	}, [])
+
 	useEffect(() => {
-		if (elements.length === 0) {
-			localStorage.removeItem(STORAGE_KEY)
-			return
+		if (!scenePersistence) return
+		const flush = () => scenePersistence.flush()
+		const flushWhenHidden = () => {
+			if (document.visibilityState === 'hidden') flush()
 		}
-		localStorage.setItem(STORAGE_KEY, JSON.stringify({ elements }))
-	}, [elements])
+		window.addEventListener('beforeunload', flush)
+		document.addEventListener('visibilitychange', flushWhenHidden)
+		return () => {
+			window.removeEventListener('beforeunload', flush)
+			document.removeEventListener('visibilitychange', flushWhenHidden)
+			scenePersistence.flush()
+		}
+	}, [scenePersistence])
 
 	const handleChange = useCallback(
 		(nextElements: readonly ExcalidrawElement[], nextAppState: AppState, _files: BinaryFiles) => {
-			setElements([...nextElements])
+			const nextScene = [...nextElements]
+			scenePersistence?.schedule(nextScene)
+			setElements(nextScene)
 			setAppState(nextAppState)
 		},
-		[]
+		[scenePersistence]
 	)
 
 	const handleAction = useCallback(
-		(action: CanvasAgentAction) => {
+		async (action: CanvasAgentAction) => {
 			if (!api) return
 			if (action._type === 'message') {
 				setHistory((current) => [...current, { role: 'assistant', content: action.text }])
@@ -60,6 +75,7 @@ function App() {
 			const currentElements = [...api.getSceneElements()]
 			switch (action._type) {
 				case 'create': {
+					const { convertToExcalidrawElements } = await import('@excalidraw/excalidraw')
 					const skeletons = action.elements.map(toElementSkeleton)
 					const created = convertToExcalidrawElements(skeletons as never[], {
 						regenerateIds: false,
@@ -146,12 +162,14 @@ function App() {
 	return (
 		<div className="app-shell">
 			<main className="canvas-shell">
-				<Excalidraw
-					initialData={initialData}
-					excalidrawAPI={setApi}
-					onChange={handleChange}
-					langCode="zh-CN"
-				/>
+				<Suspense fallback={<div className="canvas-loading" aria-hidden="true" />}>
+					<ExcalidrawCanvas
+						initialData={initialData}
+						excalidrawAPI={setApi}
+						onChange={handleChange}
+						langCode="zh-CN"
+					/>
+				</Suspense>
 			</main>
 			<aside className="agent-panel">
 				<header className="agent-header">

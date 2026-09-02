@@ -45,6 +45,12 @@ button {
 	background: #fff;
 }
 
+.canvas-loading {
+	width: 100%;
+	height: 100%;
+	background: #fff;
+}
+
 .excalidraw {
 	--default-font: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
 }

@@ -44,6 +44,7 @@
 		"client/App.tsx",
 		"client/agent.ts",
 		"client/main.tsx",
+		"client/persistence.ts",
 		"client/vite-env.d.ts",
 		"shared/canvas.ts",
 		"worker/agent/AgentService.ts",

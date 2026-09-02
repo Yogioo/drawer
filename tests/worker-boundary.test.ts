@@ -91,6 +91,48 @@ test('returns action and terminal SSE events and logs only safe diagnostics', as
 	assert.equal(JSON.stringify(logs).includes('private-element'), false)
 })
 
+test('sends only bounded viewport context and history to the upstream provider', async () => {
+	let upstreamPayload: { messages: Array<{ content: string }> } | undefined
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				...prompt(),
+				elements: [
+					...prompt().elements,
+					{ id: 'selected-offscreen', type: 'rectangle', x: 5_000, y: 5_000, width: 10, height: 10 },
+					{ id: 'unrelated', type: 'rectangle', x: 9_000, y: 9_000, width: 10, height: 10 },
+				],
+				selectedElementIds: ['selected-offscreen'],
+				history: Array.from({ length: 20 }, (_, index) => ({ role: 'user', content: `${index}`.repeat(1_000) })),
+			}),
+		}),
+		environment(),
+		{
+			fetch: async (_input, init) => {
+				upstreamPayload = JSON.parse(String(init?.body)) as typeof upstreamPayload
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	await responseText(response)
+	assert.ok(upstreamPayload)
+	const context = JSON.parse(upstreamPayload.messages[1].content) as {
+		elements: Array<{ id: string }>
+		history: Array<{ content: string }>
+		screenshot?: unknown
+	}
+	assert.deepEqual(
+		context.elements.map((element) => element.id),
+		['private-element', 'selected-offscreen']
+	)
+	assert.equal(context.history.length, 3)
+	assert.equal(context.history.reduce((total, entry) => total + entry.content.length, 0), 6_000)
+	assert.equal('screenshot' in context, false)
+})
+
 test('retries transient upstream failures and reports provider errors after the limit', async () => {
 	let attempts = 0
 	const logs: Record<string, unknown>[] = []
