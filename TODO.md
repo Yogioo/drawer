@@ -35,7 +35,7 @@
 
 ### 可选：桌面端本地 AI 服务
 
-- [ ] 评估是否需要 Rust 请求层替代远程 Worker
+- [x] 评估是否需要 Rust 请求层替代远程 Worker（结论：暂缓，见 `docs/adr/0001-local-ai-service-feasibility.md`）
 - [ ] 使用操作系统凭据存储保存用户配置
 - [ ] 避免将 key 编译进前端资源
 - [ ] 评估本地服务对启动时间、内存和 CPU 的影响
