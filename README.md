@@ -60,6 +60,28 @@ npm run dev -- --port 5174
 
 停止服务器时，在终端按 `Ctrl+C`。
 
+### 4. 启动 Tauri 桌面应用
+
+桌面开发模式使用 `http://localhost:1420` 的 Vite 服务；浏览器开发仍使用上面的 `npm run dev` 和默认端口。运行桌面应用前，在项目根目录的 `.env.local` 中配置远程 Worker：
+
+```env
+VITE_AI_WORKER_URL=https://drawer-ai.example.workers.dev/stream
+```
+
+然后执行：
+
+```powershell
+npm run desktop:dev
+```
+
+生产构建会先生成 `dist/client`，再把这些静态资源嵌入 Tauri 应用；不会启动 Node 进程、开发服务器或 Cloudflare sidecar：
+
+```powershell
+npm run desktop:build
+```
+
+Windows 安装包输出到 `src-tauri/target/release/bundle/nsis` 和 `src-tauri/target/release/bundle/msi`。发布版的 AI 请求仍发送到 `VITE_AI_WORKER_URL`，不是本地 `/stream`。远程 Worker 的 `ALLOWED_ORIGINS` 需要包含 `http://tauri.localhost`；桌面开发模式还需要允许 `http://localhost:1420`。
+
 ## 当前 AI 配置
 
 - Provider：OpenAI 兼容接口
@@ -110,7 +132,10 @@ Agent 通过 JSON 返回以下操作：
 npx tsc -b --pretty false
 npm run build
 npm test
+npm run test:smoke
 ```
+
+在 Windows 上，`npm run test:smoke` 还会启动 Tauri 开发模式、构建发布版并启动发布版可执行文件；其他平台执行浏览器 dev/preview smoke test。
 
 ## 常见问题
 

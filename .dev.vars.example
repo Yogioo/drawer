@@ -1,7 +1,7 @@
 OPENAI_API_KEY=replace_with_your_key
 OPENAI_BASE_URL=https://your-openai-compatible-provider.example/v1
 OPENAI_MODEL=grok-4.6
-ALLOWED_ORIGINS=http://localhost:5173
+ALLOWED_ORIGINS=http://localhost:5173,http://localhost:1420,http://tauri.localhost
 AI_UPSTREAM_TIMEOUT_MS=30000
 AI_UPSTREAM_MAX_RETRIES=2
 AI_UPSTREAM_RETRY_DELAY_MS=250

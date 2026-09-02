@@ -159,7 +159,12 @@ async function readHttpError(response: Response): Promise<CanvasAgentClientError
 
 export function getWorkerStreamUrl(): string {
 	const configured = import.meta.env?.VITE_AI_WORKER_URL?.trim()
-	if (!configured) return '/stream'
+	if (!configured) {
+		if (isDesktopRuntime()) {
+			throw new CanvasAgentClientError('configuration', '桌面版需要配置远程 AI Worker 地址。')
+		}
+		return '/stream'
+	}
 
 	let url: URL
 	try {
@@ -176,6 +181,13 @@ export function getWorkerStreamUrl(): string {
 
 function isLocalHost(hostname: string): boolean {
 	return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
+}
+
+function isDesktopRuntime(): boolean {
+	return (
+		typeof window !== 'undefined' &&
+		(window.location.hostname === 'tauri.localhost' || window.location.protocol === 'tauri:')
+	)
 }
 
 function toSummary(element: ExcalidrawElement): CanvasElementSummary | null {
