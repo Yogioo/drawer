@@ -354,20 +354,16 @@ function parseCompletionEvent(event: string): string {
 }
 
 export function parseResponse(value: string, prompt?: Pick<CanvasPrompt, 'elements'>): CanvasAgentResponse {
-	const withoutFence = value
-		.trim()
-		.replace(/^```(?:json)?\s*/i, '')
-		.replace(/\s*```$/i, '')
-	const start = withoutFence.indexOf('{')
-	const end = withoutFence.lastIndexOf('}')
-	if (start === -1 || end <= start) throw new AgentBoundaryError('parse', '模型没有返回有效的 JSON。')
+	const repaired = repairModelJson(value)
 
-	let parsed: Partial<CanvasAgentResponse>
+	let parsed: unknown
 	try {
-		parsed = JSON.parse(withoutFence.slice(start, end + 1)) as Partial<CanvasAgentResponse>
+		parsed = JSON.parse(repaired) as Partial<CanvasAgentResponse>
 	} catch {
 		throw new AgentBoundaryError('parse', '模型返回的 JSON 无法解析。')
 	}
+	if (!isRecord(parsed)) throw new AgentBoundaryError('parse', '模型返回的 JSON 必须是对象。')
+	rejectUnknownFields(parsed, ['actions'])
 	if (!Array.isArray(parsed.actions)) {
 		throw new AgentBoundaryError('parse', '模型返回的 JSON 缺少 actions 数组。')
 	}
@@ -377,6 +373,72 @@ export function parseResponse(value: string, prompt?: Pick<CanvasPrompt, 'elemen
 	return { actions }
 }
 
+export function repairModelJson(value: string): string {
+	const normalized = value.trim().replace(/^\uFEFF/, '')
+	const withoutFence = normalized
+		.replace(/^```[^\r\n]*(?:\r?\n|$)/i, '')
+		.replace(/(?:\r?\n|^)```\s*$/i, '')
+	const start = withoutFence.indexOf('{')
+	if (start === -1) throw new AgentBoundaryError('parse', '模型没有返回有效的 JSON。')
+	const object = extractJsonObject(withoutFence, start)
+	if (!object) throw new AgentBoundaryError('parse', '模型没有返回完整的 JSON。')
+	return removeTrailingCommas(object)
+}
+
+function extractJsonObject(value: string, start: number): string | null {
+	let depth = 0
+	let inString = false
+	let escaped = false
+	for (let index = start; index < value.length; index += 1) {
+		const character = value[index]
+		if (inString) {
+			if (escaped) escaped = false
+			else if (character === '\\') escaped = true
+			else if (character === '"') inString = false
+			continue
+		}
+		if (character === '"') {
+			inString = true
+			continue
+		}
+		if (character === '{') depth += 1
+		if (character === '}') {
+			depth -= 1
+			if (depth === 0) return value.slice(start, index + 1)
+			if (depth < 0) return null
+		}
+	}
+	return null
+}
+
+function removeTrailingCommas(value: string): string {
+	let result = ''
+	let inString = false
+	let escaped = false
+	for (let index = 0; index < value.length; index += 1) {
+		const character = value[index]
+		if (inString) {
+			result += character
+			if (escaped) escaped = false
+			else if (character === '\\') escaped = true
+			else if (character === '"') inString = false
+			continue
+		}
+		if (character === '"') {
+			inString = true
+			result += character
+			continue
+		}
+		if (character === ',') {
+			let next = index + 1
+			while (/\s/.test(value[next] ?? '')) next += 1
+			if (value[next] === '}' || value[next] === ']') continue
+		}
+		result += character
+	}
+	return result
+}
+
 function validateAction(action: unknown): CanvasAgentAction {
 	if (!action || typeof action !== 'object' || !('_type' in action)) {
 		throw new AgentBoundaryError('parse', '模型返回了无效的画布操作。')
@@ -384,33 +446,50 @@ function validateAction(action: unknown): CanvasAgentAction {
 
 	const candidate = action as Record<string, unknown>
 	const type = candidate._type
-	if (type === 'message' && typeof candidate.text === 'string') return { _type: 'message', text: candidate.text }
-	if (type === 'clear') return { _type: 'clear', intent: optionalString(candidate.intent) }
-	if (type === 'delete' && typeof candidate.elementId === 'string') {
-		return { _type: 'delete', elementId: candidate.elementId, intent: optionalString(candidate.intent) }
+	if (type === 'message') {
+		rejectUnknownFields(candidate, ['_type', 'text'])
+		if (typeof candidate.text !== 'string') throw new AgentBoundaryError('parse', '模型返回了无效的消息文本。')
+		return { _type: 'message', text: candidate.text }
 	}
-	if (type === 'move' && typeof candidate.elementId === 'string') {
+	if (type === 'clear') {
+		rejectUnknownFields(candidate, ['_type', 'intent'])
+		return { _type: 'clear', intent: optionalString(candidate.intent, 'intent') }
+	}
+	if (type === 'delete') {
+		rejectUnknownFields(candidate, ['_type', 'elementId', 'intent'])
+		return {
+			_type: 'delete',
+			elementId: requiredId(candidate.elementId, '元素 ID'),
+			intent: optionalString(candidate.intent, 'intent'),
+		}
+	}
+	if (type === 'move') {
+		rejectUnknownFields(candidate, ['_type', 'elementId', 'x', 'y', 'intent'])
 		return {
 			_type: 'move',
-			elementId: candidate.elementId,
+			elementId: requiredId(candidate.elementId, '元素 ID'),
 			x: numberValue(candidate.x),
 			y: numberValue(candidate.y),
-			intent: optionalString(candidate.intent),
+			intent: optionalString(candidate.intent, 'intent'),
 		}
 	}
-	if (type === 'update' && typeof candidate.elementId === 'string' && isRecord(candidate.updates)) {
+	if (type === 'update') {
+		rejectUnknownFields(candidate, ['_type', 'elementId', 'updates', 'intent'])
+		if (!isRecord(candidate.updates)) throw new AgentBoundaryError('parse', '模型返回了无效的元素更新。')
 		return {
 			_type: 'update',
-			elementId: candidate.elementId,
+			elementId: requiredId(candidate.elementId, '元素 ID'),
 			updates: validateUpdates(candidate.updates),
-			intent: optionalString(candidate.intent),
+			intent: optionalString(candidate.intent, 'intent'),
 		}
 	}
-	if (type === 'create' && Array.isArray(candidate.elements)) {
+	if (type === 'create') {
+		rejectUnknownFields(candidate, ['_type', 'elements', 'intent'])
+		if (!Array.isArray(candidate.elements)) throw new AgentBoundaryError('parse', '模型返回了无效的元素数组。')
 		return {
 			_type: 'create',
 			elements: candidate.elements.map(validateElement),
-			intent: optionalString(candidate.intent),
+			intent: optionalString(candidate.intent, 'intent'),
 		}
 	}
 	if (type === 'layout') return validateLayoutAction(candidate)
@@ -420,6 +499,15 @@ function validateAction(action: unknown): CanvasAgentAction {
 }
 
 function validateLayoutAction(candidate: Record<string, unknown>): CanvasLayoutAction {
+	rejectUnknownFields(candidate, [
+		'_type',
+		'operation',
+		'elementIds',
+		'alignment',
+		'axis',
+		'direction',
+		'intent',
+	])
 	if (
 		(candidate.operation !== 'align' && candidate.operation !== 'distribute' && candidate.operation !== 'sort') ||
 		!Array.isArray(candidate.elementIds) ||
@@ -444,7 +532,7 @@ function validateLayoutAction(candidate: Record<string, unknown>): CanvasLayoutA
 			operation: 'align',
 			elementIds: candidate.elementIds as string[],
 			alignment: candidate.alignment,
-			intent: optionalString(candidate.intent),
+			intent: optionalString(candidate.intent, 'intent'),
 		}
 	}
 	if (candidate.axis !== 'horizontal' && candidate.axis !== 'vertical') {
@@ -456,7 +544,7 @@ function validateLayoutAction(candidate: Record<string, unknown>): CanvasLayoutA
 			operation: 'distribute',
 			elementIds: candidate.elementIds as string[],
 			axis: candidate.axis,
-			intent: optionalString(candidate.intent),
+			intent: optionalString(candidate.intent, 'intent'),
 		}
 	}
 	if (candidate.direction !== 'ascending' && candidate.direction !== 'descending') {
@@ -468,22 +556,23 @@ function validateLayoutAction(candidate: Record<string, unknown>): CanvasLayoutA
 		elementIds: candidate.elementIds as string[],
 		axis: candidate.axis,
 		direction: candidate.direction,
-		intent: optionalString(candidate.intent),
+		intent: optionalString(candidate.intent, 'intent'),
 	}
 }
 
 function validateBindAction(candidate: Record<string, unknown>): CanvasBindAction {
+	rejectUnknownFields(candidate, ['_type', 'arrowId', 'startElementId', 'endElementId', 'intent'])
 	const hasStart = Object.prototype.hasOwnProperty.call(candidate, 'startElementId')
 	const hasEnd = Object.prototype.hasOwnProperty.call(candidate, 'endElementId')
-	if (typeof candidate.arrowId !== 'string' || candidate.arrowId.length === 0 || (!hasStart && !hasEnd)) {
+	if ((!hasStart && !hasEnd)) {
 		throw new AgentBoundaryError('parse', '模型返回了无效的箭头绑定操作。')
 	}
 	return {
 		_type: 'bind',
-		arrowId: candidate.arrowId,
+		arrowId: requiredId(candidate.arrowId, '箭头 ID'),
 		...(hasStart ? { startElementId: optionalBindingId(candidate.startElementId) } : {}),
 		...(hasEnd ? { endElementId: optionalBindingId(candidate.endElementId) } : {}),
-		intent: optionalString(candidate.intent),
+		intent: optionalString(candidate.intent, 'intent'),
 	}
 }
 
@@ -516,8 +605,12 @@ function validateActionReferences(
 			continue
 		}
 		if (action._type === 'update' || action._type === 'move' || action._type === 'delete') {
-			if (!elementsById.has(action.elementId)) {
+			const target = elementsById.get(action.elementId)
+			if (!target) {
 				throw new AgentBoundaryError('parse', '模型引用了不存在的画布元素。')
+			}
+			if (action._type === 'update' && action.updates.points && !isLinearCanvasElementType(target.type)) {
+				throw new AgentBoundaryError('parse', '模型只能更新箭头、线条或自由笔迹的点数据。')
 			}
 			if (action._type === 'delete') elementsById.delete(action.elementId)
 			continue
@@ -541,25 +634,47 @@ function validateActionReferences(
 
 function validateElement(value: unknown): CanvasElementSpec {
 	if (!isRecord(value)) throw new AgentBoundaryError('parse', '模型返回了无效的画布元素。')
+	rejectUnknownFields(value, [
+		'id',
+		'type',
+		'x',
+		'y',
+		'width',
+		'height',
+		'text',
+		'points',
+		'strokeColor',
+		'backgroundColor',
+		'strokeWidth',
+		'strokeStyle',
+		'roughness',
+	])
 	const type = value.type
 	if (!isCanvasElementType(type)) {
 		throw new AgentBoundaryError('parse', `模型返回了不支持的元素类型：${String(type)}`)
 	}
+	const points = optionalPoints(value.points)
+	if (points && !isLinearCanvasElementType(type)) {
+		throw new AgentBoundaryError('parse', '模型返回的点数据只支持箭头、线条和自由笔迹。')
+	}
+	if (points && points.length < 2) {
+		throw new AgentBoundaryError('parse', '模型返回的线条至少需要两个点。')
+	}
 
 	return {
-		id: optionalString(value.id),
+		id: value.id === undefined ? undefined : requiredId(value.id, '元素 ID'),
 		type: type as CanvasElementSpec['type'],
 		x: numberValue(value.x),
 		y: numberValue(value.y),
-		width: optionalNumber(value.width),
-		height: optionalNumber(value.height),
-		text: optionalString(value.text),
-		points: Array.isArray(value.points) ? value.points.map(validatePoint) : undefined,
-		strokeColor: optionalString(value.strokeColor),
-		backgroundColor: optionalString(value.backgroundColor),
-		strokeWidth: optionalNumber(value.strokeWidth),
+		width: optionalNonNegativeNumber(value.width, '宽度'),
+		height: optionalNonNegativeNumber(value.height, '高度'),
+		text: optionalString(value.text, '元素文本'),
+		points,
+		strokeColor: optionalString(value.strokeColor, '描边颜色'),
+		backgroundColor: optionalString(value.backgroundColor, '填充颜色'),
+		strokeWidth: optionalNonNegativeNumber(value.strokeWidth, '描边宽度'),
 		strokeStyle: optionalStrokeStyle(value.strokeStyle),
-		roughness: optionalNumber(value.roughness),
+		roughness: optionalNonNegativeNumber(value.roughness, '粗糙度'),
 	}
 }
 
@@ -582,10 +697,10 @@ function validateUpdates(value: Record<string, unknown>): Partial<CanvasElementS
 				updates.y = numberValue(field)
 				break
 			case 'width':
-				updates.width = numberValue(field)
+				updates.width = nonNegativeNumber(field, '宽度')
 				break
 			case 'height':
-				updates.height = numberValue(field)
+				updates.height = nonNegativeNumber(field, '高度')
 				break
 			case 'text':
 				if (typeof field !== 'string') throw new AgentBoundaryError('parse', '模型返回了无效的元素文本。')
@@ -593,6 +708,7 @@ function validateUpdates(value: Record<string, unknown>): Partial<CanvasElementS
 				break
 			case 'points':
 				if (!Array.isArray(field)) throw new AgentBoundaryError('parse', '模型返回了无效的自由笔迹点。')
+				if (field.length < 2) throw new AgentBoundaryError('parse', '模型返回的线条至少需要两个点。')
 				updates.points = field.map(validatePoint)
 				break
 			case 'strokeColor':
@@ -604,7 +720,7 @@ function validateUpdates(value: Record<string, unknown>): Partial<CanvasElementS
 				updates.backgroundColor = field
 				break
 			case 'strokeWidth':
-				updates.strokeWidth = numberValue(field)
+				updates.strokeWidth = nonNegativeNumber(field, '描边宽度')
 				break
 			case 'strokeStyle':
 				if (field !== 'solid' && field !== 'dashed' && field !== 'dotted') {
@@ -613,7 +729,7 @@ function validateUpdates(value: Record<string, unknown>): Partial<CanvasElementS
 				updates.strokeStyle = field
 				break
 			case 'roughness':
-				updates.roughness = numberValue(field)
+				updates.roughness = nonNegativeNumber(field, '粗糙度')
 				break
 			default:
 				throw new AgentBoundaryError('parse', `模型返回了未知的元素更新字段：${key}`)
@@ -788,21 +904,48 @@ function finiteNumber(value: unknown): value is number {
 	return typeof value === 'number' && Number.isFinite(value)
 }
 
-function numberValue(value: unknown): number {
-	if (!finiteNumber(value)) throw new AgentBoundaryError('parse', '模型返回了无效的数字。')
+function numberValue(value: unknown, label = '数字'): number {
+	if (!finiteNumber(value)) throw new AgentBoundaryError('parse', `模型返回了无效的${label}。`)
 	return value
 }
 
-function optionalNumber(value: unknown): number | undefined {
-	return value === undefined ? undefined : numberValue(value)
+function optionalNonNegativeNumber(value: unknown, label: string): number | undefined {
+	return value === undefined ? undefined : nonNegativeNumber(value, label)
 }
 
-function optionalString(value: unknown): string | undefined {
-	return typeof value === 'string' ? value : undefined
+function nonNegativeNumber(value: unknown, label: string): number {
+	const parsed = numberValue(value, label)
+	if (parsed < 0) throw new AgentBoundaryError('parse', `模型返回的${label}不能为负数。`)
+	return parsed
+}
+
+function optionalString(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined
+	if (typeof value === 'string') return value
+	throw new AgentBoundaryError('parse', `模型返回的${label}必须是字符串。`)
 }
 
 function optionalStrokeStyle(value: unknown): CanvasElementSpec['strokeStyle'] | undefined {
-	return value === 'solid' || value === 'dashed' || value === 'dotted' ? value : undefined
+	if (value === undefined) return undefined
+	if (value === 'solid' || value === 'dashed' || value === 'dotted') return value
+	throw new AgentBoundaryError('parse', '模型返回了无效的描边样式。')
+}
+
+function optionalPoints(value: unknown): CanvasElementSpec['points'] | undefined {
+	if (value === undefined) return undefined
+	if (!Array.isArray(value)) throw new AgentBoundaryError('parse', '模型返回了无效的自由笔迹点。')
+	return value.map(validatePoint)
+}
+
+function requiredId(value: unknown, label: string): string {
+	if (typeof value === 'string' && value.length > 0) return value
+	throw new AgentBoundaryError('parse', `模型返回了无效的${label}。`)
+}
+
+function rejectUnknownFields(value: Record<string, unknown>, allowed: readonly string[]) {
+	const allowedFields = new Set(allowed)
+	const unknown = Object.keys(value).find((key) => !allowedFields.has(key))
+	if (unknown) throw new AgentBoundaryError('parse', `模型返回了不支持的字段：${unknown}`)
 }
 
 function isLocalHost(hostname: string): boolean {
@@ -811,4 +954,8 @@ function isLocalHost(hostname: string): boolean {
 
 function isCanvasElementType(value: unknown): value is CanvasElementSpec['type'] {
 	return typeof value === 'string' && CANVAS_ELEMENT_TYPES.has(value)
+}
+
+function isLinearCanvasElementType(type: string): boolean {
+	return type === 'arrow' || type === 'line' || type === 'freedraw'
 }

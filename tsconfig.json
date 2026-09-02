@@ -43,6 +43,7 @@
 	"include": [
 		"client/App.tsx",
 		"client/agent.ts",
+		"client/canvas-operation.ts",
 		"client/main.tsx",
 		"client/persistence.ts",
 		"client/vite-env.d.ts",

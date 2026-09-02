@@ -300,6 +300,66 @@ test('rejects malformed update fields instead of passing them to the client', ()
 	)
 })
 
+test('repairs only safe JSON punctuation before validating model actions', () => {
+	const parsed = parseResponse([
+		'Here is the result:',
+		'```json',
+		'{"actions":[{"_type":"message","text":"已完成",},],}',
+		'```',
+	].join('\n'))
+
+	assert.deepEqual(parsed.actions, [{ _type: 'message', text: '已完成' }])
+})
+
+test('rejects invalid optional fields and unsupported model content clearly', () => {
+	assert.throws(
+		() => parseResponse(JSON.stringify({ actions: [{ _type: 'message', text: 'ok', intent: 1 }] })),
+		(error: unknown) => error instanceof Error && /intent|字段|字符串/.test(error.message)
+	)
+	assert.throws(
+		() => parseResponse(JSON.stringify({ actions: [{ _type: 'create', elements: [{ type: 'image', x: 0, y: 0 }] }] })),
+		(error: unknown) => error instanceof Error && /不支持的元素类型/.test(error.message)
+	)
+	assert.throws(
+		() => parseResponse(JSON.stringify({ actions: [{ _type: 'move', elementId: 'one', x: null, y: 0 }] })),
+		(error: unknown) => error instanceof Error && /无效的数字/.test(error.message)
+	)
+	assert.throws(
+		() => parseResponse(JSON.stringify({ actions: [{ _type: 'create', elements: [{ type: 'rectangle', x: 0, y: 0, width: -1 }] }] })),
+		(error: unknown) => error instanceof Error && /宽度不能为负数/.test(error.message)
+	)
+	assert.throws(
+		() =>
+			parseResponse(
+				JSON.stringify({
+					actions: [{ _type: 'create', elements: [{ type: 'rectangle', x: 0, y: 0, points: [{ x: 0, y: 0 }] }] }],
+				})
+			),
+		(error: unknown) => error instanceof Error && /点数据只支持/.test(error.message)
+	)
+	assert.throws(
+		() =>
+			parseResponse(
+				JSON.stringify({
+					actions: [{ _type: 'create', elements: [{ type: 'line', x: 0, y: 0, points: [{ x: 0, y: 0 }] }] }],
+				})
+			),
+		(error: unknown) => error instanceof Error && /至少需要两个点/.test(error.message)
+	)
+	assert.throws(
+		() =>
+			parseResponse(
+				JSON.stringify({
+					actions: [
+						{ _type: 'update', elementId: 'rectangle', updates: { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] } },
+					],
+				}),
+				{ elements: [{ id: 'rectangle', type: 'rectangle', x: 0, y: 0, width: 10, height: 10 }] }
+			),
+		(error: unknown) => error instanceof Error && /只能更新箭头/.test(error.message)
+	)
+})
+
 test('accepts layout and binding actions only for elements in the canvas context', () => {
 	const context = {
 		elements: [

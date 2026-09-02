@@ -152,6 +152,141 @@ button {
 	color: #aab4c0;
 }
 
+.operation-history {
+	flex: 0 1 auto;
+	max-height: 42%;
+	overflow-y: auto;
+	padding: 0 20px 12px;
+	border-top: 1px solid #2b3038;
+	scrollbar-width: thin;
+	scrollbar-color: #414955 transparent;
+}
+
+.operation-history-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 0 8px;
+	color: #aab4c0;
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.operation-history-header span:last-child {
+	color: #687482;
+	font-variant-numeric: tabular-nums;
+}
+
+.operation-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.operation-item {
+	padding: 10px;
+	border: 1px solid #363d47;
+	border-radius: 7px;
+	background: #20252c;
+}
+
+.operation-pending {
+	border-color: #6f86a5;
+	background: #202a36;
+}
+
+.operation-failed {
+	border-color: #714848;
+}
+
+.operation-item-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+	font-size: 12px;
+}
+
+.operation-item-header strong {
+	min-width: 0;
+	color: #e7ebef;
+	font-weight: 600;
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+}
+
+.operation-item-header span {
+	flex: 0 0 auto;
+	color: #85909f;
+	font-size: 11px;
+}
+
+.operation-pending .operation-item-header span {
+	color: #bdd6f4;
+}
+
+.operation-failed .operation-item-header span {
+	color: #ff9d9d;
+}
+
+.operation-preview,
+.operation-error {
+	margin-top: 6px;
+	overflow-wrap: anywhere;
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.operation-preview {
+	color: #a8c4e4;
+}
+
+.operation-error {
+	color: #ffabab;
+}
+
+.operation-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-top: 9px;
+}
+
+.operation-button {
+	padding: 5px 8px;
+	border: 1px solid #495362;
+	border-radius: 5px;
+	background: transparent;
+	color: #cbd3dc;
+	font-size: 11px;
+	line-height: 1.2;
+}
+
+.operation-button:hover {
+	background: #2b323c;
+	color: #fff;
+}
+
+.operation-accept {
+	border-color: #7899bd;
+	color: #d4e7ff;
+}
+
+.operation-reject,
+.operation-retry {
+	color: #ffb6b6;
+}
+
+.operation-undo {
+	color: #c9d9c6;
+}
+
+.operation-button:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
 .agent-status {
 	margin: 0 20px 10px;
 	color: #8f9aaa;
@@ -240,6 +375,16 @@ button {
 
 	.conversation {
 		padding: 14px 16px;
+	}
+
+	.operation-history {
+		max-height: 38%;
+		padding-right: 16px;
+		padding-left: 16px;
+	}
+
+	.operation-item {
+		padding: 9px;
 	}
 
 	.composer {
