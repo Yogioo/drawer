@@ -139,10 +139,16 @@ AI 修改流程会先在内存中完整计算操作组，预览确认后才一�
 npx tsc -b --pretty false
 npm run build
 npm test
+npm run test:security
 npm run test:smoke
+npm run test:installer
 ```
 
-在 Windows 上，`npm run test:smoke` 还会启动 Tauri 开发模式、构建发布版并启动发布版可执行文件；其他平台执行浏览器 dev/preview smoke test。
+`npm run test:release` 会按顺序运行全部 typecheck、单元测试、依赖安全检查、浏览器 dev/preview smoke、Tauri 开发和发布启动检查，以及 Windows 安装器检查。
+
+在 Windows 上，`npm run test:smoke` 会启动 Tauri 开发模式、构建 NSIS/MSI 发布包、启动发布版可执行文件并检查其子进程；`npm run test:installer` 会在临时目录中静默安装 NSIS 包、启动后检查没有 Node 或 Cloudflare sidecar，再静默卸载并确认文件移除。其他平台的安装器检查会跳过，浏览器 dev/preview smoke 仍然执行。
+
+`npm test` 中包含一次受控的本地 OpenAI-compatible Chat Completions streaming 验证。测试使用脱敏 token 和本地 HTTP 服务，不保存真实凭据或模型输出。
 
 ## 常见问题
 

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { request } from 'node:http'
 import { basename, resolve } from 'node:path'
+import { findSidecarProcesses, validateReleaseArtifacts } from './release-assertions.mjs'
 
 const host = '127.0.0.1'
 const devPort = 1420
@@ -23,6 +24,7 @@ if (process.platform === 'win32') {
 	await withDesktopDev()
 	await runCommand('desktop:build')
 	await withDesktopBinary(resolve('src-tauri', 'target', 'release', 'drawer.exe'))
+	assertWindowsReleaseArtifacts()
 }
 
 console.log('Browser startup smoke tests passed.')
@@ -67,9 +69,21 @@ async function withDesktopBinary(binary) {
 	const child = spawn(binary, [], { windowsHide: true, stdio: 'ignore' })
 	try {
 		await waitForProcess(binary, child)
+		assert.deepEqual(findSidecarProcesses(readProcessSnapshot(), child.pid), [], 'release binary started an unexpected sidecar')
 	} finally {
 		await stopProcess(child)
 	}
+}
+
+function assertWindowsReleaseArtifacts() {
+	const paths = [
+		resolve('src-tauri', 'target', 'release', 'bundle', 'nsis', 'Drawer_0.1.0_x64-setup.exe'),
+		resolve('src-tauri', 'target', 'release', 'bundle', 'msi', 'Drawer_0.1.0_x64_en-US.msi'),
+	]
+	const invalid = validateReleaseArtifacts(
+		paths.map((path) => ({ path, exists: existsSync(path), size: existsSync(path) ? statSync(path).size : 0 }))
+	)
+	assert.deepEqual(invalid, [], `missing or empty Windows release artifacts: ${invalid.join(', ')}`)
 }
 
 function spawnNpm(args, options) {
@@ -126,6 +140,26 @@ function isProcessRunning(name) {
 		windowsHide: true,
 	})
 	return result.status === 0 && result.stdout.toLowerCase().includes(`"${name.toLowerCase()}"`)
+}
+
+function readProcessSnapshot() {
+	const result = spawnSync(
+		'powershell.exe',
+		[
+			'-NoProfile',
+			'-NonInteractive',
+			'-Command',
+			'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress',
+		],
+		{ encoding: 'utf8', windowsHide: true }
+	)
+	assert.equal(result.status, 0, `could not inspect the Windows process tree: ${result.stderr}`)
+	const value = result.stdout.trim() ? JSON.parse(result.stdout) : []
+	return (Array.isArray(value) ? value : [value]).map((process) => ({
+		pid: Number(process.ProcessId),
+		parentPid: Number(process.ParentProcessId),
+		name: String(process.Name),
+	}))
 }
 
 function assertProcessStopped(binary) {

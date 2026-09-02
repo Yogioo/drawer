@@ -8,3 +8,6 @@ node_modules
 .wrangler
 dist
 .tsbuild
+
+# This repository tracks issues in GitHub, not local Beads data.
+.beads/
