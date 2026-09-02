@@ -26,9 +26,21 @@ Copy-Item .dev.vars.example .dev.vars
 OPENAI_API_KEY=填写你的 API key
 OPENAI_BASE_URL=https://你的 OpenAI 兼容服务地址/v1
 OPENAI_MODEL=grok-4.6
+ALLOWED_ORIGINS=http://localhost:5173
+AI_UPSTREAM_TIMEOUT_MS=30000
+AI_UPSTREAM_MAX_RETRIES=2
+AI_UPSTREAM_RETRY_DELAY_MS=250
 ```
 
 服务需要支持 Chat Completions、流式输出和模型对应的输入能力。项目会把 API key 留在 Cloudflare Worker 环境中，不会发送到浏览器端。
+
+浏览器默认请求当前站点的 `/stream`，由本地 Wrangler Worker 处理。部署 Worker 后，在项目根目录的 `.env.local` 中设置浏览器请求目标；可以填写完整的稳定 HTTPS 地址，也可以继续使用本地地址：
+
+```env
+VITE_AI_WORKER_URL=https://drawer-ai.example.workers.dev/stream
+```
+
+`VITE_AI_WORKER_URL` 只能配置 Worker 地址，客户端不会读取 `OPENAI_*` 变量。生产 Worker 的 `ALLOWED_ORIGINS` 必须填写实际浏览器来源，多个来源使用逗号分隔；不要配置 `*`。
 
 不要把真实 key 写入 README、源码或提交记录。`.dev.vars`、构建产物和本地 Wrangler 目录已经加入 `.gitignore`。
 
@@ -53,10 +65,10 @@ npm run dev -- --port 5174
 - Provider：OpenAI 兼容接口
 - API：Chat Completions
 - 默认模型：`grok-4.6`
-- 服务端：Cloudflare Worker 本地运行时
+- 服务端：Cloudflare Worker（本地开发或稳定 HTTPS 部署）
 - 画布：Excalidraw infinite canvas
 
-模型和中转配置分别位于 `worker/agent/AgentService.ts` 与 `.dev.vars`。模型输出会被校验为画布操作，成功和失败都会通过 SSE 返回给客户端。
+模型和上游配置位于 Worker 环境变量，模型输出会被校验为画布操作，成功、失败和结束都会通过 SSE 返回给客户端。Worker 对上游请求使用有限超时和重试，并记录 request id、状态、耗时和重试次数；日志不会记录 API key、完整提示词或画布内容。
 
 ## 主要功能
 
@@ -97,6 +109,7 @@ Agent 通过 JSON 返回以下操作：
 ```powershell
 npx tsc -b --pretty false
 npm run build
+npm test
 ```
 
 ## 常见问题
@@ -115,7 +128,7 @@ npm run build
 
 ### 页面没有反馈
 
-打开浏览器开发者工具和终端日志。Worker 会把配置错误、上游模型错误和 JSON 解析错误作为 SSE 错误事件返回，聊天面板会显示具体原因。
+打开浏览器开发者工具和 Worker 终端日志。Worker 会把配置、认证、网络、超时、Provider、JSON 解析、客户端和 CORS 错误区分为 SSE 或 HTTP 错误事件返回，聊天面板会显示具体原因。请求完成或失败都会发送终止事件，客户端不会一直保持忙碌状态。
 
 ## 许可证
 

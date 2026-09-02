@@ -85,3 +85,20 @@ export type CanvasAgentAction =
 export interface CanvasAgentResponse {
 	actions: CanvasAgentAction[]
 }
+
+export type CanvasAgentErrorCode =
+	| 'configuration'
+	| 'authentication'
+	| 'network'
+	| 'timeout'
+	| 'provider'
+	| 'parse'
+	| 'client'
+	| 'cors'
+
+export interface CanvasAgentErrorEvent {
+	code: CanvasAgentErrorCode
+	message: string
+	retryable?: boolean
+	requestId?: string
+}

@@ -6,7 +6,8 @@
 	"scripts": {
 		"build": "vite build",
 		"dev": "vite --host",
-		"preview": "vite preview"
+		"preview": "vite preview",
+		"test": "node --experimental-strip-types --test tests/*.test.ts"
 	},
 	"dependencies": {
 		"@ai-sdk/openai": "^2.0.106",

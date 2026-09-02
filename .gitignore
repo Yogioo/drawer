@@ -3,6 +3,8 @@ node_modules
 .yarn/
 .dev.vars
 *.dev.vars
+.env.local
+.env.*.local
 .wrangler
 dist
 .tsbuild
