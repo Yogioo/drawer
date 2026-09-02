@@ -1,0 +1,3 @@
+OPENAI_API_KEY=replace_with_your_key
+OPENAI_BASE_URL=https://your-openai-compatible-provider.example/v1
+OPENAI_MODEL=grok-4.6
