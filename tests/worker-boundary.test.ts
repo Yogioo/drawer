@@ -248,6 +248,27 @@ test('rejects malformed canvas context before calling the upstream', async () =>
 	assert.match(await responseText(response), /"code":"client"/)
 })
 
+test('rejects selected element IDs that are missing from the prompt context', async () => {
+	let called = false
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ ...prompt(), selectedElementIds: ['missing'] }),
+		}),
+		environment(),
+		{
+			fetch: async () => {
+				called = true
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	assert.equal(called, false)
+	assert.match(await responseText(response), /"code":"client"/)
+})
+
 test('does not retry after cancellation during the retry delay', async () => {
 	let attempts = 0
 	const controller = new AbortController()
@@ -274,6 +295,56 @@ test('rejects malformed update fields instead of passing them to the client', ()
 				JSON.stringify({
 					actions: [{ _type: 'update', elementId: 'element', updates: { x: 'not-a-number' } }],
 				})
+			),
+		(error: unknown) => error instanceof Error && 'code' in error && error.code === 'parse'
+	)
+})
+
+test('accepts layout and binding actions only for elements in the canvas context', () => {
+	const context = {
+		elements: [
+			{ id: 'left', type: 'rectangle' as const, x: 0, y: 0, width: 100, height: 80 },
+			{ id: 'right', type: 'ellipse' as const, x: 300, y: 0, width: 100, height: 80 },
+			{ id: 'arrow', type: 'arrow' as const, x: 0, y: 0, width: 400, height: 80 },
+		],
+	}
+	const parsed = parseResponse(
+		JSON.stringify({
+			actions: [
+				{ _type: 'layout', operation: 'align', elementIds: ['left', 'right'], alignment: 'top' },
+				{ _type: 'bind', arrowId: 'arrow', startElementId: 'left', endElementId: 'right' },
+			],
+		}),
+		context
+	)
+	assert.equal(parsed.actions[0]._type, 'layout')
+	assert.equal(parsed.actions[1]._type, 'bind')
+	const createdThenBound = parseResponse(
+		JSON.stringify({
+			actions: [
+				{ _type: 'create', elements: [{ id: 'new-arrow', type: 'arrow', x: 100, y: 100 }] },
+				{ _type: 'bind', arrowId: 'new-arrow', startElementId: 'left' },
+			],
+		}),
+		context
+	)
+	assert.equal(createdThenBound.actions[1]._type, 'bind')
+
+	assert.throws(
+		() =>
+			parseResponse(
+				JSON.stringify({
+					actions: [{ _type: 'layout', operation: 'sort', elementIds: ['missing'], axis: 'horizontal', direction: 'ascending' }],
+				}),
+				context
+			),
+		(error: unknown) => error instanceof Error && 'code' in error && error.code === 'parse'
+	)
+	assert.throws(
+		() =>
+			parseResponse(
+				JSON.stringify({ actions: [{ _type: 'move', elementId: 'missing', x: 10, y: 20 }] }),
+				context
 			),
 		(error: unknown) => error instanceof Error && 'code' in error && error.code === 'parse'
 	)

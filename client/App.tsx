@@ -5,7 +5,12 @@ import type {
 	ExcalidrawImperativeAPI,
 } from '@excalidraw/excalidraw/types'
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CanvasAgentAction, CanvasElementSpec } from '../shared/canvas'
+import {
+	applyCanvasBinding,
+	applyCanvasLayout,
+	type CanvasAgentAction,
+	type CanvasElementSpec,
+} from '../shared/canvas'
 import { ChatEntry, createCanvasPrompt, streamCanvasAgent } from './agent'
 import { createScenePersistence, readPersistedScene } from './persistence'
 
@@ -73,14 +78,25 @@ function App() {
 			}
 
 			const currentElements = [...api.getSceneElements()]
+			const { CaptureUpdateAction, convertToExcalidrawElements } = await import('@excalidraw/excalidraw')
+			const commit = (nextElements: readonly ExcalidrawElement[]) => {
+				if (
+					nextElements.length !== currentElements.length ||
+					nextElements.some((element, index) => element !== currentElements[index])
+				) {
+					api.updateScene({ elements: nextElements, captureUpdate: CaptureUpdateAction.IMMEDIATELY })
+				}
+			}
 			switch (action._type) {
 				case 'create': {
-					const { convertToExcalidrawElements } = await import('@excalidraw/excalidraw')
 					const skeletons = action.elements.map(toElementSkeleton)
 					const created = convertToExcalidrawElements(skeletons as never[], {
 						regenerateIds: false,
 					})
-					api.updateScene({ elements: [...currentElements, ...created] })
+					api.updateScene({
+						elements: [...currentElements, ...created],
+						captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+					})
 					setStatus(action.intent || `已创建 ${created.length} 个元素`)
 					break
 				}
@@ -90,7 +106,7 @@ function App() {
 							? updateElement(element, action.updates)
 							: element
 					)
-					api.updateScene({ elements: updated })
+					commit(updated)
 					setStatus(action.intent || '已更新元素')
 					break
 				}
@@ -100,20 +116,43 @@ function App() {
 							? updateElement(element, { x: action.x, y: action.y })
 							: element
 					)
-					api.updateScene({ elements: updated })
+					commit(updated)
 					setStatus(action.intent || '已移动元素')
 					break
 				}
-				case 'delete':
-					api.updateScene({
-						elements: currentElements.filter((element) => element.id !== action.elementId),
-					})
+				case 'delete': {
+					const updated = currentElements.filter((element) => element.id !== action.elementId)
+					commit(updated)
 					setStatus(action.intent || '已删除元素')
 					break
+				}
 				case 'clear':
-					api.updateScene({ elements: [] })
+					commit([])
 					setStatus(action.intent || '已清空画布')
 					break
+				case 'layout': {
+					const laidOut = applyCanvasLayout(currentElements, action)
+					const updated =
+						action.operation === 'sort'
+							? laidOut
+							: laidOut.map((element, index) =>
+									element === currentElements[index]
+										? element
+										: updateElement(currentElements[index], { x: element.x, y: element.y })
+								)
+					commit(updated)
+					setStatus(action.intent || '已完成布局')
+					break
+				}
+				case 'bind': {
+					const bound = applyCanvasBinding(currentElements, action)
+					const updated = bound.map((element, index) =>
+						element === currentElements[index] ? element : bumpElementVersion(element)
+					)
+					commit(updated)
+					setStatus(action.intent || '已更新箭头绑定')
+					break
+				}
 			}
 		},
 		[api]
@@ -272,6 +311,14 @@ function updateElement(element: ExcalidrawElement, updates: Partial<CanvasElemen
 	next.version = element.version + 1
 	next.versionNonce = Math.floor(Math.random() * 2 ** 31)
 	return next as ExcalidrawElement
+}
+
+function bumpElementVersion(element: ExcalidrawElement): ExcalidrawElement {
+	return {
+		...element,
+		version: element.version + 1,
+		versionNonce: Math.floor(Math.random() * 2 ** 31),
+	} as ExcalidrawElement
 }
 
 export default App

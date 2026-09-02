@@ -52,10 +52,12 @@ export function createCanvasPrompt(
 	const summaries = contextCandidates
 		.map(toSummary)
 		.filter((summary): summary is CanvasElementSummary => !!summary)
+	const supportedElementIds = new Set(summaries.map((summary) => summary.id))
+	const supportedSelectedElementIds = selectedElementIds.filter((id) => supportedElementIds.has(id))
 	return {
 		message,
-		elements: selectCanvasContextElements(summaries, selectedElementIds, viewport),
-		selectedElementIds,
+		elements: selectCanvasContextElements(summaries, supportedSelectedElementIds, viewport),
+		selectedElementIds: supportedSelectedElementIds,
 		viewport,
 		history: boundCanvasHistory(history),
 	}
@@ -236,6 +238,11 @@ function toSummary(element: ExcalidrawElement): CanvasElementSummary | null {
 			.map(([x, y]) => ({ x, y }))
 	}
 	if ('containerId' in element && element.containerId) summary.text = summary.text || ''
+	if (element.type === 'arrow') {
+		if (element.startBinding) summary.startBindingElementId = element.startBinding.elementId
+		if (element.endBinding) summary.endBindingElementId = element.endBinding.elementId
+	}
+	if (element.boundElements?.length) summary.boundElementIds = element.boundElements.map(({ id }) => id)
 	return summary
 }
 

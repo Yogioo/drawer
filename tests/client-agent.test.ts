@@ -80,3 +80,42 @@ test('keeps selected elements when the viewport contains more than the context b
 	assert.equal(prompt.elements.length, 120)
 	assert.equal(prompt.elements.some((element) => element.id === 'selected-offscreen'), true)
 })
+
+test('includes arrow binding relationships in the AI canvas context', () => {
+	const prompt = createCanvasPrompt(
+		'keep the connection attached',
+		[
+			rectangle('source', 100, 100),
+			rectangle('target', 400, 100),
+			{
+				...rectangle('arrow', 100, 100),
+				type: 'arrow',
+				points: [[0, 40], [300, 40]],
+				startBinding: { elementId: 'source', focus: 0, gap: 0 },
+				endBinding: { elementId: 'target', focus: 0, gap: 0 },
+				boundElements: null,
+			} as ExcalidrawElement,
+		],
+		appState(),
+		[]
+	)
+
+	const arrow = prompt.elements.find((element) => element.id === 'arrow')
+	assert.equal(arrow?.startBindingElementId, 'source')
+	assert.equal(arrow?.endBindingElementId, 'target')
+})
+
+test('omits selected elements that are outside the shared canvas protocol', () => {
+	const prompt = createCanvasPrompt(
+		'keep the supported selection',
+		[
+			rectangle('supported', 100, 100),
+			{ ...rectangle('image', 200, 100), type: 'image' } as ExcalidrawElement,
+		],
+		appState({ supported: true, image: true }),
+		[]
+	)
+
+	assert.deepEqual(prompt.selectedElementIds, ['supported'])
+	assert.deepEqual(prompt.elements.map((element) => element.id), ['supported'])
+})

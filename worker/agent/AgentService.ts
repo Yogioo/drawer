@@ -1,12 +1,16 @@
 import {
 	boundCanvasSelectedElementIds,
 	boundCanvasHistory,
+	isCanvasBindableElementType,
+	MAX_CANVAS_SELECTED_IDS,
 	selectCanvasContextElements,
 } from '../../shared/canvas.ts'
 import type {
 	CanvasAgentAction,
 	CanvasAgentErrorCode,
 	CanvasAgentResponse,
+	CanvasBindAction,
+	CanvasLayoutAction,
 	CanvasElementSummary,
 	CanvasElementSpec,
 	CanvasPrompt,
@@ -42,6 +46,10 @@ Available actions:
 - {"_type":"move","elementId":"id","x":0,"y":0,"intent":"..."} - move an element's top-left corner.
 - {"_type":"delete","elementId":"id","intent":"..."} - delete one element.
 - {"_type":"clear","intent":"..."} - delete every element.
+- {"_type":"layout","operation":"align","elementIds":["id"],"alignment":"left|center|right|top|middle|bottom","intent":"..."} - align selected elements.
+- {"_type":"layout","operation":"distribute","elementIds":["id"],"axis":"horizontal|vertical","intent":"..."} - distribute selected elements evenly.
+- {"_type":"layout","operation":"sort","elementIds":["id"],"axis":"horizontal|vertical","direction":"ascending|descending","intent":"..."} - sort selected elements in scene order.
+- {"_type":"bind","arrowId":"arrow-id","startElementId":"element-id|null","endElementId":"element-id|null","intent":"..."} - bind or unbind an arrow endpoint. Omit an endpoint to keep its current binding.
 
 ElementSpec fields:
 - type: rectangle, ellipse, diamond, text, arrow, line, or freedraw.
@@ -52,6 +60,8 @@ ElementSpec fields:
 
 Rules:
 - Use the existing element IDs when updating, moving, or deleting.
+- For layout requests, prefer the IDs in selectedElementIds and copy them exactly into elementIds.
+- Use a stable id when creating an element that will be referenced by a later bind or layout action in the same response.
 - Keep IDs stable and unique when creating elements. If omitted, the client generates them.
 - Prefer several simple elements over an overly complex drawing.
 - Coordinates should stay near the user's viewport unless the user asks otherwise.
@@ -139,7 +149,7 @@ export class AgentService {
 			const prompt = validateCanvasPrompt(input)
 			const result = await this.requestWithRetry(config, prompt, signal)
 			retries = result.retries
-			const actions = parseResponse(result.text).actions
+			const actions = parseResponse(result.text, prompt).actions
 			this.requestDiagnostics = {
 				status: 'success',
 				durationMs: elapsedMs(startedAt, this.now()),
@@ -343,7 +353,7 @@ function parseCompletionEvent(event: string): string {
 	}
 }
 
-export function parseResponse(value: string): CanvasAgentResponse {
+export function parseResponse(value: string, prompt?: Pick<CanvasPrompt, 'elements'>): CanvasAgentResponse {
 	const withoutFence = value
 		.trim()
 		.replace(/^```(?:json)?\s*/i, '')
@@ -362,7 +372,9 @@ export function parseResponse(value: string): CanvasAgentResponse {
 		throw new AgentBoundaryError('parse', '模型返回的 JSON 缺少 actions 数组。')
 	}
 
-	return { actions: parsed.actions.map(validateAction) }
+	const actions = parsed.actions.map(validateAction)
+	if (prompt) validateActionReferences(actions, prompt.elements)
+	return { actions }
 }
 
 function validateAction(action: unknown): CanvasAgentAction {
@@ -401,8 +413,130 @@ function validateAction(action: unknown): CanvasAgentAction {
 			intent: optionalString(candidate.intent),
 		}
 	}
+	if (type === 'layout') return validateLayoutAction(candidate)
+	if (type === 'bind') return validateBindAction(candidate)
 
 	throw new AgentBoundaryError('parse', `模型返回了无效的操作类型：${String(type)}`)
+}
+
+function validateLayoutAction(candidate: Record<string, unknown>): CanvasLayoutAction {
+	if (
+		(candidate.operation !== 'align' && candidate.operation !== 'distribute' && candidate.operation !== 'sort') ||
+		!Array.isArray(candidate.elementIds) ||
+		!candidate.elementIds.every((id) => typeof id === 'string' && id.length > 0) ||
+		candidate.elementIds.length > MAX_CANVAS_SELECTED_IDS
+	) {
+		throw new AgentBoundaryError('parse', '模型返回了无效的布局操作。')
+	}
+	if (candidate.operation === 'align') {
+		if (
+			candidate.alignment !== 'left' &&
+			candidate.alignment !== 'center' &&
+			candidate.alignment !== 'right' &&
+			candidate.alignment !== 'top' &&
+			candidate.alignment !== 'middle' &&
+			candidate.alignment !== 'bottom'
+		) {
+			throw new AgentBoundaryError('parse', '模型返回了无效的对齐方式。')
+		}
+		return {
+			_type: 'layout',
+			operation: 'align',
+			elementIds: candidate.elementIds as string[],
+			alignment: candidate.alignment,
+			intent: optionalString(candidate.intent),
+		}
+	}
+	if (candidate.axis !== 'horizontal' && candidate.axis !== 'vertical') {
+		throw new AgentBoundaryError('parse', '模型返回了无效的布局方向。')
+	}
+	if (candidate.operation === 'distribute') {
+		return {
+			_type: 'layout',
+			operation: 'distribute',
+			elementIds: candidate.elementIds as string[],
+			axis: candidate.axis,
+			intent: optionalString(candidate.intent),
+		}
+	}
+	if (candidate.direction !== 'ascending' && candidate.direction !== 'descending') {
+		throw new AgentBoundaryError('parse', '模型返回了无效的排序方向。')
+	}
+	return {
+		_type: 'layout',
+		operation: 'sort',
+		elementIds: candidate.elementIds as string[],
+		axis: candidate.axis,
+		direction: candidate.direction,
+		intent: optionalString(candidate.intent),
+	}
+}
+
+function validateBindAction(candidate: Record<string, unknown>): CanvasBindAction {
+	const hasStart = Object.prototype.hasOwnProperty.call(candidate, 'startElementId')
+	const hasEnd = Object.prototype.hasOwnProperty.call(candidate, 'endElementId')
+	if (typeof candidate.arrowId !== 'string' || candidate.arrowId.length === 0 || (!hasStart && !hasEnd)) {
+		throw new AgentBoundaryError('parse', '模型返回了无效的箭头绑定操作。')
+	}
+	return {
+		_type: 'bind',
+		arrowId: candidate.arrowId,
+		...(hasStart ? { startElementId: optionalBindingId(candidate.startElementId) } : {}),
+		...(hasEnd ? { endElementId: optionalBindingId(candidate.endElementId) } : {}),
+		intent: optionalString(candidate.intent),
+	}
+}
+
+function optionalBindingId(value: unknown): string | null {
+	if (value === null) return null
+	if (typeof value === 'string' && value.length > 0) return value
+	throw new AgentBoundaryError('parse', '模型返回了无效的绑定元素 ID。')
+}
+
+function validateActionReferences(
+	actions: readonly CanvasAgentAction[],
+	elements: readonly CanvasElementSummary[]
+) {
+	const elementsById = new Map<string, { type: string }>(elements.map((element) => [element.id, element]))
+	for (const action of actions) {
+		if (action._type === 'create') {
+			for (const element of action.elements) {
+				if (!element.id) continue
+				if (elementsById.has(element.id)) {
+					throw new AgentBoundaryError('parse', '模型创建了重复的画布元素 ID。')
+				}
+				elementsById.set(element.id, element)
+			}
+			continue
+		}
+		if (action._type === 'layout') {
+			for (const elementId of action.elementIds) {
+				if (!elementsById.has(elementId)) throw new AgentBoundaryError('parse', '模型引用了不存在的画布元素。')
+			}
+			continue
+		}
+		if (action._type === 'update' || action._type === 'move' || action._type === 'delete') {
+			if (!elementsById.has(action.elementId)) {
+				throw new AgentBoundaryError('parse', '模型引用了不存在的画布元素。')
+			}
+			if (action._type === 'delete') elementsById.delete(action.elementId)
+			continue
+		}
+		if (action._type === 'clear') {
+			elementsById.clear()
+			continue
+		}
+		if (action._type !== 'bind') continue
+		const arrow = elementsById.get(action.arrowId)
+		if (!arrow || arrow.type !== 'arrow') throw new AgentBoundaryError('parse', '模型引用了无效的箭头。')
+		for (const elementId of [action.startElementId, action.endElementId]) {
+			if (elementId === undefined || elementId === null) continue
+			const target = elementsById.get(elementId)
+			if (!target || !isCanvasBindableElementType(target.type)) {
+				throw new AgentBoundaryError('parse', '模型引用了无效的箭头绑定目标。')
+			}
+		}
+	}
 }
 
 function validateElement(value: unknown): CanvasElementSpec {
@@ -439,13 +573,8 @@ function validateUpdates(value: Record<string, unknown>): Partial<CanvasElementS
 	for (const [key, field] of Object.entries(value)) {
 		switch (key) {
 			case 'id':
-				if (typeof field !== 'string') throw new AgentBoundaryError('parse', '模型返回了无效的元素 ID。')
-				updates.id = field
-				break
 			case 'type':
-				if (!isCanvasElementType(field)) throw new AgentBoundaryError('parse', '模型返回了无效的元素类型。')
-				updates.type = field
-				break
+				throw new AgentBoundaryError('parse', '元素 ID 和类型不可通过 update 修改。')
 			case 'x':
 				updates.x = numberValue(field)
 				break
@@ -505,12 +634,20 @@ export function validateCanvasPrompt(value: unknown): CanvasPrompt {
 	if (!value.elements.every(isCanvasElementSummary)) {
 		throw new AgentBoundaryError('client', '画布元素上下文无效。')
 	}
+	const elementIds = new Set<string>()
+	for (const element of value.elements as CanvasElementSummary[]) {
+		if (elementIds.has(element.id)) throw new AgentBoundaryError('client', '画布元素 ID 重复。')
+		elementIds.add(element.id)
+	}
 	const viewport = value.viewport
 	if (!isRecord(viewport) || !['x', 'y', 'w', 'h'].every((key) => finiteNumber(viewport[key]))) {
 		throw new AgentBoundaryError('client', '画布视口无效。')
 	}
 	if (!value.selectedElementIds.every((id) => typeof id === 'string')) {
 		throw new AgentBoundaryError('client', '选中的元素 ID 无效。')
+	}
+	if ((value.selectedElementIds as unknown[]).some((id) => !elementIds.has(id as string))) {
+		throw new AgentBoundaryError('client', '选中的元素不存在。')
 	}
 	if (
 		!value.history.every(
@@ -539,6 +676,7 @@ function isCanvasElementSummary(value: unknown): value is CanvasElementSummary {
 	if (
 		!isRecord(value) ||
 		typeof value.id !== 'string' ||
+		value.id.length === 0 ||
 		!isCanvasElementType(value.type) ||
 		!finiteNumber(value.x) ||
 		!finiteNumber(value.y) ||
@@ -554,6 +692,12 @@ function isCanvasElementSummary(value: unknown): value is CanvasElementSummary {
 	if (value.strokeWidth !== undefined && !finiteNumber(value.strokeWidth)) return false
 	if (value.strokeStyle !== undefined && !isStrokeStyle(value.strokeStyle)) return false
 	if (value.roughness !== undefined && !finiteNumber(value.roughness)) return false
+	if (value.startBindingElementId !== undefined && typeof value.startBindingElementId !== 'string') return false
+	if (value.endBindingElementId !== undefined && typeof value.endBindingElementId !== 'string') return false
+	if (
+		value.boundElementIds !== undefined &&
+		(!Array.isArray(value.boundElementIds) || !value.boundElementIds.every((id) => typeof id === 'string'))
+	) return false
 	return true
 }
 
