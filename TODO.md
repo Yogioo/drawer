@@ -20,7 +20,7 @@
 - [x] 保留浏览器端开发模式，不影响 `npm run dev`
 - [x] 配置单实例窗口并在重复启动时唤回主窗口
 - [x] 生成 Windows 安装包并验证安装、启动和卸载
-- [ ] 评估是否需要 macOS 和 Linux 构建目标
+- [x] 评估是否需要 macOS 和 Linux 构建目标（结论：macOS 后续优先，Linux 限定试点，见 `docs/adr/0002-macos-linux-target-evaluation.md`）
 
 ## AI 后端
 
