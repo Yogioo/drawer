@@ -28,13 +28,21 @@ export interface CanvasElementSpec {
 	roughness?: number
 }
 
-export interface CanvasElementSummary extends CanvasElementSpec {
+export interface CanvasImageContext {
+	fileId: string
+	mimeType: string
+	dataUrl: string
+}
+
+export interface CanvasElementSummary extends Omit<CanvasElementSpec, 'type'> {
 	id: string
+	type: CanvasElementType | 'image'
 	width: number
 	height: number
 	startBindingElementId?: string
 	endBindingElementId?: string
 	boundElementIds?: string[]
+	image?: CanvasImageContext
 }
 
 export interface CanvasLayoutElement {
@@ -95,6 +103,10 @@ export const MAX_CANVAS_CONTEXT_TEXT_LENGTH = 1_000
 export const MAX_CANVAS_HISTORY_ENTRIES = 8
 export const MAX_CANVAS_HISTORY_CHARS = 6_000
 export const MAX_CANVAS_SELECTED_IDS = 120
+export const MAX_CANVAS_IMAGE_COUNT = 4
+export const MAX_CANVAS_IMAGE_BYTES = 5 * 1024 * 1024
+export const MAX_CANVAS_IMAGE_CONTEXT_BYTES = 12 * 1024 * 1024
+export const CANVAS_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const
 
 export interface CanvasViewport {
 	x: number
@@ -109,9 +121,44 @@ export interface CanvasPrompt {
 	selectedElementIds: string[]
 	viewport: CanvasViewport
 	history: { role: 'user' | 'assistant'; content: string }[]
+	includeImageContext?: boolean
 }
 
 export type CanvasHistoryEntry = CanvasPrompt['history'][number]
+
+export function isSupportedCanvasImageMimeType(value: string): boolean {
+	return (CANVAS_IMAGE_MIME_TYPES as readonly string[]).includes(value.toLowerCase())
+}
+
+const CANVAS_IMAGE_DATA_URL = /^data:([^;,]+);base64,([a-z\d+/]*={0,2})$/i
+
+export function canvasImageDataUrlMimeType(value: string): string | null {
+	const match = CANVAS_IMAGE_DATA_URL.exec(value)
+	return match?.[1].toLowerCase() ?? null
+}
+
+export function canvasImageDataUrlByteLength(value: string): number | null {
+	const match = CANVAS_IMAGE_DATA_URL.exec(value)
+	if (!match || !isSupportedCanvasImageMimeType(match[1])) return null
+	const base64 = match[2]
+	if (base64.length % 4 === 1) return null
+	const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+	return Math.max(0, Math.floor((base64.length * 3) / 4) - padding)
+}
+
+export function isExplicitCanvasImageRequest(message: string): boolean {
+	const normalized = message.toLowerCase()
+	const imageReference = /\b(?:images?|pictures?|photos?|screenshots?|pics?)\b|图片|图像|照片|截图|图里|图中|这张图|该图|这幅图/i.test(normalized)
+	const analysisIntent =
+		/(?:\b(?:analy[sz]e|describe|read|recogniz|identify|inspect|examine|look(?:\s+at)?|view|summari[sz]e?|extract|ocr)\b|\btell\s+me\s+about\b|\bwhat(?:'s| is| do you see)\b|内容|文字|文本|分析|描述|读取|识别|查看|看看|看一下|看下|看一看|帮我看|介绍|有什么)/i.test(
+			normalized
+		)
+	const negatedAnalysisIntent =
+		/(?:\b(?:do not|don't|dont|never|not)\s+(?:analy[sz]e|describe|read|recogniz(?:e|ing)?|identify|inspect|examine|look|view|summari[sz]e?|extract|ocr)\b|(?:不要|无需|不用|别)\s*(?:分析|描述|读取|识别|查看|看看|看一下|看下|看一看))/i.test(
+			normalized
+		)
+	return imageReference && analysisIntent && !negatedAnalysisIntent
+}
 
 export function boundCanvasSelectedElementIds(selectedElementIds: readonly string[]): string[] {
 	return [...new Set(selectedElementIds)].slice(0, MAX_CANVAS_SELECTED_IDS)
@@ -128,12 +175,18 @@ export function selectCanvasContextElements(
 	)
 	if (relevant.length <= MAX_CANVAS_CONTEXT_ELEMENTS) return relevant.map(compactCanvasElement)
 
-	const selectedElements = relevant
-		.filter((element) => selected.has(element.id))
-		.slice(-MAX_CANVAS_CONTEXT_ELEMENTS)
-	const viewportElements = relevant.filter((element) => !selected.has(element.id))
-	const available = Math.max(0, MAX_CANVAS_CONTEXT_ELEMENTS - selectedElements.length)
-	return [...viewportElements.slice(0, available), ...selectedElements].map(compactCanvasElement)
+	const prioritizedElements = relevant.filter((element) => element.type === 'image').slice(0, MAX_CANVAS_CONTEXT_ELEMENTS)
+	const prioritizedIds = new Set(prioritizedElements.map((element) => element.id))
+	const remaining = Math.max(0, MAX_CANVAS_CONTEXT_ELEMENTS - prioritizedElements.length)
+	const selectedElements =
+		remaining > 0
+			? relevant
+					.filter((element) => selected.has(element.id) && !prioritizedIds.has(element.id))
+					.slice(-remaining)
+			: []
+	const viewportElements = relevant.filter((element) => !selected.has(element.id) && !prioritizedIds.has(element.id))
+	const available = Math.max(0, remaining - selectedElements.length)
+	return [...viewportElements.slice(0, available), ...selectedElements, ...prioritizedElements].map(compactCanvasElement)
 }
 
 export function boundCanvasHistory(history: readonly CanvasHistoryEntry[]): CanvasHistoryEntry[] {

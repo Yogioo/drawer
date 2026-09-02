@@ -290,7 +290,7 @@ function App() {
 			const messages: string[] = []
 
 			try {
-				const prompt = createCanvasPrompt(message, elements, appState, nextHistory)
+				const prompt = createCanvasPrompt(message, elements, appState, nextHistory, api?.getFiles())
 				await streamCanvasAgent(prompt, controller.signal, async (action) => {
 					if (action._type === 'message') {
 						messages.push(action.text)

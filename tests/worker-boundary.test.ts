@@ -4,6 +4,7 @@ import { streamCanvasAgent } from '../client/agent.ts'
 import { AgentService, parseResponse } from '../worker/agent/AgentService.ts'
 import { handleWorkerRequest } from '../worker/handler.ts'
 import type { Environment } from '../worker/environment.ts'
+import { MAX_CANVAS_IMAGE_COUNT } from '../shared/canvas.ts'
 
 const API_KEY = 'test-key-that-must-never-be-logged'
 const PROMPT = 'draw a private architecture diagram'
@@ -36,6 +37,31 @@ function prompt() {
 		selectedElementIds: [],
 		viewport: { x: 0, y: 0, w: 800, h: 600 },
 		history: [],
+	}
+}
+
+function imagePrompt(overrides: Record<string, unknown> = {}) {
+	return {
+		...prompt(),
+		message: '分析选中的图片',
+		includeImageContext: true,
+		elements: [
+			{
+				id: 'picture',
+				type: 'image' as const,
+				x: 10,
+				y: 20,
+				width: 100,
+				height: 80,
+				image: {
+					fileId: 'picture-file',
+					mimeType: 'image/png',
+					dataUrl: 'data:image/png;base64,aGVsbG8=',
+				},
+			},
+		],
+		selectedElementIds: ['picture'],
+		...overrides,
 	}
 }
 
@@ -131,6 +157,165 @@ test('sends only bounded viewport context and history to the upstream provider',
 	assert.equal(context.history.length, 3)
 	assert.equal(context.history.reduce((total, entry) => total + entry.content.length, 0), 6_000)
 	assert.equal('screenshot' in context, false)
+})
+
+test('sends selected image elements as multimodal provider input only when requested', async () => {
+	let upstreamPayload: { messages: Array<{ content: unknown }> } | undefined
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(imagePrompt()),
+		}),
+		environment(),
+		{
+			fetch: async (_input, init) => {
+				upstreamPayload = JSON.parse(String(init?.body)) as typeof upstreamPayload
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	await responseText(response)
+	assert.ok(upstreamPayload)
+	const content = upstreamPayload.messages[1].content as Array<Record<string, unknown>>
+	assert.equal(content[0].type, 'text')
+	assert.equal(content.some((part) => part.type === 'image_url'), true)
+	assert.deepEqual(content.find((part) => part.type === 'image_url'), {
+		type: 'image_url',
+		image_url: { url: 'data:image/png;base64,aGVsbG8=' },
+	})
+	assert.equal(String(content[0].text).includes('aGVsbG8='), false)
+})
+
+test('rejects missing image data before calling the upstream', async () => {
+	let called = false
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(imagePrompt({ elements: [{ ...imagePrompt().elements[0], image: undefined }] })),
+		}),
+		environment(),
+		{
+			fetch: async () => {
+				called = true
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	assert.equal(called, false)
+	assert.match(await responseText(response), /图片上下文无效/)
+})
+
+test('rejects an explicit image workflow without an in-scope image', async () => {
+	let called = false
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(imagePrompt({ elements: [], selectedElementIds: [] })),
+		}),
+		environment(),
+		{
+			fetch: async () => {
+				called = true
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	assert.equal(called, false)
+	assert.match(await responseText(response), /没有可分析的图片元素/)
+})
+
+test('rejects image context that exceeds the worker image count limit', async () => {
+	const elements = Array.from({ length: MAX_CANVAS_IMAGE_COUNT + 1 }, (_, index) => ({
+		id: `picture-${index}`,
+		type: 'image' as const,
+		x: index * 10,
+		y: 20,
+		width: 100,
+		height: 80,
+		image: {
+			fileId: `file-${index}`,
+			mimeType: 'image/png',
+			dataUrl: 'data:image/png;base64,aGVsbG8=',
+		},
+	}))
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(imagePrompt({ elements, selectedElementIds: elements.map((element) => element.id) })),
+		}),
+		environment()
+	)
+
+	assert.match(await responseText(response), /最多分析/)
+})
+
+test('rejects oversized image context before calling the upstream', async () => {
+	let called = false
+	const oversizedDataUrl = `data:image/png;base64,${'a'.repeat(Math.ceil((5 * 1024 * 1024 + 1) * 4 / 3))}`
+	const image = imagePrompt()
+	const element = image.elements[0] as Record<string, unknown>
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				...image,
+				elements: [{ ...element, image: { ...(element.image as Record<string, unknown>), dataUrl: oversizedDataUrl } }],
+			}),
+		}),
+		environment(),
+		{
+			fetch: async () => {
+				called = true
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	assert.equal(called, false)
+	assert.match(await responseText(response), /超过单张大小限制/)
+})
+
+test('rejects image payloads without the explicit image workflow marker', async () => {
+	let called = false
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(imagePrompt({ includeImageContext: false })),
+		}),
+		environment(),
+		{
+			fetch: async () => {
+				called = true
+				return upstreamSuccess()
+			},
+		}
+	)
+
+	assert.equal(called, false)
+	assert.match(await responseText(response), /只能在明确的图片分析请求中发送/)
+})
+
+test('reports when the provider does not support image input', async () => {
+	const response = await handleWorkerRequest(
+		new Request('https://worker.example/stream', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(imagePrompt()),
+		}),
+		environment(),
+		{ fetch: async () => new Response('vision is not supported', { status: 400 }) }
+	)
+
+	assert.match(await responseText(response), /不支持图片输入/)
 })
 
 test('retries transient upstream failures and reports provider errors after the limit', async () => {

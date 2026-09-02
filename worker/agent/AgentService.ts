@@ -1,7 +1,14 @@
 import {
 	boundCanvasSelectedElementIds,
 	boundCanvasHistory,
+	canvasImageDataUrlByteLength,
+	canvasImageDataUrlMimeType,
 	isCanvasBindableElementType,
+	isExplicitCanvasImageRequest,
+	isSupportedCanvasImageMimeType,
+	MAX_CANVAS_IMAGE_BYTES,
+	MAX_CANVAS_IMAGE_CONTEXT_BYTES,
+	MAX_CANVAS_IMAGE_COUNT,
 	MAX_CANVAS_SELECTED_IDS,
 	selectCanvasContextElements,
 } from '../../shared/canvas.ts'
@@ -33,6 +40,7 @@ const CANVAS_ELEMENT_TYPES = new Set([
 	'line',
 	'freedraw',
 ])
+const CANVAS_CONTEXT_ELEMENT_TYPES = new Set([...CANVAS_ELEMENT_TYPES, 'image'])
 
 const SYSTEM_PROMPT = `You are a precise AI assistant for an infinite whiteboard.
 
@@ -65,6 +73,7 @@ Rules:
 - Keep IDs stable and unique when creating elements. If omitted, the client generates them.
 - Prefer several simple elements over an overly complex drawing.
 - Coordinates should stay near the user's viewport unless the user asks otherwise.
+- When image context is attached, inspect the provided image inputs and refer to their element IDs in your answer. Never claim to have inspected an image that was not attached.
 - Always include a message action explaining what you did when the request changes the canvas.
 - Never use markdown fences, commentary outside the JSON object, or unknown action types.`
 
@@ -231,20 +240,14 @@ export class AgentService {
 						},
 						{
 							role: 'user',
-							content: JSON.stringify({
-								request: prompt.message,
-								viewport: prompt.viewport,
-								selectedElementIds: prompt.selectedElementIds,
-								elements: prompt.elements,
-								history: prompt.history,
-							}),
+							content: providerContent(prompt),
 						},
 					],
 				}),
 				signal: controller.signal,
 			})
 
-			if (!response.ok) throw await upstreamError(response, timedOut)
+			if (!response.ok) throw await upstreamError(response, timedOut, prompt.includeImageContext === true)
 			if (!response.body) {
 				throw new AgentBoundaryError('provider', 'AI Provider 没有返回数据流。', true, response.status)
 			}
@@ -283,11 +286,61 @@ class RetryCountError extends Error {
 	}
 }
 
-async function upstreamError(response: Response, timedOut: boolean): Promise<AgentBoundaryError> {
+type ProviderContentPart =
+	| { type: 'text'; text: string }
+	| { type: 'image_url'; image_url: { url: string } }
+
+function providerContent(prompt: CanvasPrompt): string | ProviderContentPart[] {
+	const imageElements = prompt.includeImageContext === true
+		? prompt.elements.filter((element) => element.type === 'image')
+		: []
+	if (imageElements.length === 0) {
+		return JSON.stringify({
+			request: prompt.message,
+			viewport: prompt.viewport,
+			selectedElementIds: prompt.selectedElementIds,
+			elements: prompt.elements,
+			history: prompt.history,
+		})
+	}
+
+	const context = {
+		request: prompt.message,
+		viewport: prompt.viewport,
+		selectedElementIds: prompt.selectedElementIds,
+		elements: prompt.elements.map(({ image: _image, ...element }) => element),
+		history: prompt.history,
+		images: imageElements.map((element) => ({
+			elementId: element.id,
+			fileId: element.image?.fileId,
+			mimeType: element.image?.mimeType,
+		})),
+	}
+	const content: ProviderContentPart[] = [{ type: 'text', text: JSON.stringify(context) }]
+	for (const element of imageElements) {
+		if (!element.image) throw new AgentBoundaryError('client', '图片上下文无效，请重新选择图片后重试。')
+		content.push({ type: 'image_url', image_url: { url: element.image.dataUrl } })
+	}
+	return content
+}
+
+async function upstreamError(
+	response: Response,
+	timedOut: boolean,
+	includesImageContext = false
+): Promise<AgentBoundaryError> {
 	if (timedOut) return new AgentBoundaryError('timeout', 'AI Provider 请求超时，请稍后重试。', true)
 	const retryable = response.status === 408 || response.status === 429 || response.status >= 500
 	if (response.status === 401 || response.status === 403) {
 		return new AgentBoundaryError('authentication', 'AI Provider 认证失败，请检查 Worker 配置。', false, response.status)
+	}
+	if (includesImageContext && (response.status === 400 || response.status === 415 || response.status === 422)) {
+		return new AgentBoundaryError(
+			'provider',
+			'AI Provider 不支持图片输入，请更换支持视觉输入的模型后重试。',
+			false,
+			response.status
+		)
 	}
 	return new AgentBoundaryError(
 		'provider',
@@ -747,8 +800,12 @@ export function validateCanvasPrompt(value: unknown): CanvasPrompt {
 	if (!Array.isArray(value.elements) || !Array.isArray(value.selectedElementIds) || !Array.isArray(value.history)) {
 		throw new AgentBoundaryError('client', '画布请求缺少有效的上下文。')
 	}
+	if (value.includeImageContext !== undefined && typeof value.includeImageContext !== 'boolean') {
+		throw new AgentBoundaryError('client', '图片上下文标记无效。')
+	}
 	if (!value.elements.every(isCanvasElementSummary)) {
-		throw new AgentBoundaryError('client', '画布元素上下文无效。')
+		const includesImage = value.elements.some((element) => isRecord(element) && element.type === 'image')
+		throw new AgentBoundaryError('client', includesImage ? '图片上下文无效。' : '画布元素上下文无效。')
 	}
 	const elementIds = new Set<string>()
 	for (const element of value.elements as CanvasElementSummary[]) {
@@ -779,12 +836,27 @@ export function validateCanvasPrompt(value: unknown): CanvasPrompt {
 	const elements = value.elements as CanvasElementSummary[]
 	const history = value.history as CanvasPrompt['history']
 	const validViewport = viewport as unknown as CanvasPrompt['viewport']
+	const includeImageContext = value.includeImageContext === true
+	if (includeImageContext && !isExplicitCanvasImageRequest(value.message)) {
+		throw new AgentBoundaryError('client', '图片上下文只能用于明确的图片分析请求。')
+	}
+	if (elements.some((element) => element.type === 'image') && !includeImageContext) {
+		throw new AgentBoundaryError('client', '图片上下文只能在明确的图片分析请求中发送。')
+	}
+	const contextElements = selectCanvasContextElements(elements, selectedElementIds, validViewport)
+	if (includeImageContext) {
+		validateImageContext(elements)
+		if (!contextElements.some((element) => element.type === 'image')) {
+			throw new AgentBoundaryError('client', '当前视口或选区没有可分析的图片元素，请选择或移入一张图片后重试。')
+		}
+	}
 	return {
 		message: value.message,
-		elements: selectCanvasContextElements(elements, selectedElementIds, validViewport),
+		elements: contextElements,
 		selectedElementIds,
 		viewport: validViewport,
 		history: boundCanvasHistory(history),
+		...(includeImageContext ? { includeImageContext: true } : {}),
 	}
 }
 
@@ -793,7 +865,7 @@ function isCanvasElementSummary(value: unknown): value is CanvasElementSummary {
 		!isRecord(value) ||
 		typeof value.id !== 'string' ||
 		value.id.length === 0 ||
-		!isCanvasElementType(value.type) ||
+		!isCanvasContextElementType(value.type) ||
 		!finiteNumber(value.x) ||
 		!finiteNumber(value.y) ||
 		!finiteNumber(value.width) ||
@@ -814,7 +886,49 @@ function isCanvasElementSummary(value: unknown): value is CanvasElementSummary {
 		value.boundElementIds !== undefined &&
 		(!Array.isArray(value.boundElementIds) || !value.boundElementIds.every((id) => typeof id === 'string'))
 	) return false
+	if (value.type === 'image') {
+		if (
+			!isRecord(value.image) ||
+			typeof value.image.fileId !== 'string' ||
+			value.image.fileId.length === 0 ||
+			typeof value.image.mimeType !== 'string' ||
+			typeof value.image.dataUrl !== 'string'
+		) {
+			return false
+		}
+	} else if (value.image !== undefined) {
+		return false
+	}
 	return true
+}
+
+function validateImageContext(elements: readonly CanvasElementSummary[]) {
+	const images = elements.filter((element) => element.type === 'image')
+	if (images.length > MAX_CANVAS_IMAGE_COUNT) {
+		throw new AgentBoundaryError(
+			'client',
+			`一次最多分析 ${MAX_CANVAS_IMAGE_COUNT} 张图片，请减少选区后重试。`
+		)
+	}
+	let totalBytes = 0
+	for (const element of images) {
+		const image = element.image
+		if (!image || !isSupportedCanvasImageMimeType(image.mimeType)) {
+			throw new AgentBoundaryError('client', `图片 ${element.id} 的格式不受支持，请转换后重试。`)
+		}
+		const bytes = canvasImageDataUrlByteLength(image.dataUrl)
+		if (!bytes) throw new AgentBoundaryError('client', `图片 ${element.id} 的数据无效，请重新插入图片后重试。`)
+		if (bytes > MAX_CANVAS_IMAGE_BYTES) {
+			throw new AgentBoundaryError('client', `图片 ${element.id} 超过单张大小限制，请压缩图片后重试。`)
+		}
+		if (canvasImageDataUrlMimeType(image.dataUrl) !== image.mimeType.toLowerCase()) {
+			throw new AgentBoundaryError('client', `图片 ${element.id} 的格式无效，请重新插入图片后重试。`)
+		}
+		totalBytes += bytes
+	}
+	if (totalBytes > MAX_CANVAS_IMAGE_CONTEXT_BYTES) {
+		throw new AgentBoundaryError('client', '图片上下文总大小超出限制，请减少图片数量或压缩图片后重试。')
+	}
 }
 
 function isCanvasPoint(value: unknown): value is { x: number; y: number } {
@@ -954,6 +1068,10 @@ function isLocalHost(hostname: string): boolean {
 
 function isCanvasElementType(value: unknown): value is CanvasElementSpec['type'] {
 	return typeof value === 'string' && CANVAS_ELEMENT_TYPES.has(value)
+}
+
+function isCanvasContextElementType(value: unknown): value is CanvasElementSummary['type'] {
+	return typeof value === 'string' && CANVAS_CONTEXT_ELEMENT_TYPES.has(value)
 }
 
 function isLinearCanvasElementType(type: string): boolean {

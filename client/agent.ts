@@ -1,9 +1,16 @@
-import type { AppState } from '@excalidraw/excalidraw/types'
+import type { AppState, BinaryFiles } from '@excalidraw/excalidraw/types'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import {
 	boundCanvasSelectedElementIds,
 	boundCanvasHistory,
+	canvasImageDataUrlByteLength,
+	canvasImageDataUrlMimeType,
 	intersectsCanvasViewport,
+	isExplicitCanvasImageRequest,
+	isSupportedCanvasImageMimeType,
+	MAX_CANVAS_IMAGE_BYTES,
+	MAX_CANVAS_IMAGE_CONTEXT_BYTES,
+	MAX_CANVAS_IMAGE_COUNT,
 	MAX_CANVAS_CONTEXT_POINTS,
 	selectCanvasContextElements,
 } from '../shared/canvas.ts'
@@ -19,6 +26,8 @@ export interface ChatEntry {
 	role: 'user' | 'assistant'
 	content: string
 }
+
+export { isExplicitCanvasImageRequest } from '../shared/canvas.ts'
 
 export class CanvasAgentClientError extends Error {
 	readonly code: CanvasAgentErrorCode
@@ -36,7 +45,8 @@ export function createCanvasPrompt(
 	message: string,
 	elements: readonly ExcalidrawElement[],
 	appState: AppState,
-	history: readonly ChatEntry[]
+	history: readonly ChatEntry[],
+	files?: BinaryFiles
 ): CanvasPrompt {
 	const visibleElements = elements.filter((element) => !element.isDeleted)
 	const selectedElementIds = boundCanvasSelectedElementIds(
@@ -49,9 +59,18 @@ export function createCanvasPrompt(
 	const contextCandidates = visibleElements.filter(
 		(element) => selected.has(element.id) || intersectsCanvasViewport(element, viewport)
 	)
+	const includeImageContext = isExplicitCanvasImageRequest(message)
+	const imageCandidates = contextCandidates.filter((element) => element.type === 'image')
+	if (includeImageContext && imageCandidates.length === 0) {
+		throw new CanvasAgentClientError(
+			'client',
+			'当前视口或选区没有可分析的图片元素，请选择或移入一张图片后重试。'
+		)
+	}
 	const summaries = contextCandidates
-		.map(toSummary)
+		.map((element) => toSummary(element, includeImageContext, files ?? {}))
 		.filter((summary): summary is CanvasElementSummary => !!summary)
+	if (includeImageContext) validateImageContext(summaries)
 	const supportedElementIds = new Set(summaries.map((summary) => summary.id))
 	const supportedSelectedElementIds = selectedElementIds.filter((id) => supportedElementIds.has(id))
 	return {
@@ -60,6 +79,7 @@ export function createCanvasPrompt(
 		selectedElementIds: supportedSelectedElementIds,
 		viewport,
 		history: boundCanvasHistory(history),
+		...(includeImageContext ? { includeImageContext: true } : {}),
 	}
 }
 
@@ -213,9 +233,10 @@ function isDesktopRuntime(): boolean {
 	)
 }
 
-function toSummary(element: ExcalidrawElement): CanvasElementSummary | null {
+function toSummary(element: ExcalidrawElement, includeImageContext: boolean, files: BinaryFiles): CanvasElementSummary | null {
 	const supportedType = getSupportedType(element.type)
 	if (!supportedType) return null
+	if (element.type === 'image' && !includeImageContext) return null
 
 	const summary: CanvasElementSummary = {
 		id: element.id,
@@ -243,6 +264,29 @@ function toSummary(element: ExcalidrawElement): CanvasElementSummary | null {
 		if (element.endBinding) summary.endBindingElementId = element.endBinding.elementId
 	}
 	if (element.boundElements?.length) summary.boundElementIds = element.boundElements.map(({ id }) => id)
+	if (element.type === 'image') {
+		const fileId = element.fileId
+		if (!fileId || !files[fileId]) {
+			throw new CanvasAgentClientError('client', `图片文件缺失：${element.id}，请重新插入图片后重试。`)
+		}
+		const file = files[fileId]
+		const dataUrl = String(file.dataURL)
+		const mimeType = String(file.mimeType).toLowerCase()
+		if (!isSupportedCanvasImageMimeType(mimeType)) {
+			throw new CanvasAgentClientError('client', `图片 ${element.id} 的格式不受支持，请转换后重试。`)
+		}
+		const bytes = canvasImageDataUrlByteLength(dataUrl)
+		if (bytes === null || bytes === 0) {
+			throw new CanvasAgentClientError('client', `图片 ${element.id} 的数据无效，请重新插入图片后重试。`)
+		}
+		if (bytes > MAX_CANVAS_IMAGE_BYTES) {
+			throw new CanvasAgentClientError('client', `图片 ${element.id} 超过单张大小限制，请压缩图片后重试。`)
+		}
+		if (canvasImageDataUrlMimeType(dataUrl) !== mimeType) {
+			throw new CanvasAgentClientError('client', `图片 ${element.id} 的格式无效，请重新插入图片后重试。`)
+		}
+		summary.image = { fileId, mimeType, dataUrl }
+	}
 	return summary
 }
 
@@ -254,11 +298,33 @@ function getSupportedType(type: ExcalidrawElement['type']): CanvasElementSummary
 		type === 'text' ||
 		type === 'arrow' ||
 		type === 'line' ||
-		type === 'freedraw'
+		type === 'freedraw' ||
+		type === 'image'
 	) {
 		return type
 	}
 	return null
+}
+
+function validateImageContext(elements: readonly CanvasElementSummary[]) {
+	const images = elements.filter((element) => element.type === 'image')
+	if (images.length > MAX_CANVAS_IMAGE_COUNT) {
+		throw new CanvasAgentClientError(
+			'client',
+			`一次最多分析 ${MAX_CANVAS_IMAGE_COUNT} 张图片，请减少选区后重试。`
+		)
+	}
+	let totalBytes = 0
+	for (const element of images) {
+		const bytes = canvasImageDataUrlByteLength(element.image?.dataUrl ?? '')
+		if (bytes === null || bytes === 0) {
+			throw new CanvasAgentClientError('client', `图片 ${element.id} 的数据无效，请重新插入图片后重试。`)
+		}
+		totalBytes += bytes
+	}
+	if (totalBytes > MAX_CANVAS_IMAGE_CONTEXT_BYTES) {
+		throw new CanvasAgentClientError('client', '图片上下文总大小超出限制，请减少图片数量或压缩图片后重试。')
+	}
 }
 
 function getViewport(appState: AppState): CanvasViewport {
