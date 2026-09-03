@@ -1,6 +1,8 @@
 # Excalidraw AI 画布
 
-这是一个基于 [Excalidraw](https://excalidraw.com/) 的 AI 无限画布应用。你可以通过右侧聊天面板让 AI 读取并修改画布，例如创建流程图、移动元素、整理布局或生成手绘内容。
+这是一个基于 [Excalidraw](https://excalidraw.com/) 的 AI 无限画布应用，支持浏览器开发和 Windows 桌面发布。你可以通过右侧聊天面板让 AI 读取并修改画布，例如创建流程图、整理布局、绑定箭头、分析图片元素或预览后再应用操作。
+
+当前发布范围是浏览器版本加 Windows 桌面安装包。macOS / Linux 和桌面端本地 AI 服务已完成评估，暂不进第一次发布；详见 `docs/adr/`。未完成项见 `TODO.md`。
 
 ## 快速开始
 
@@ -97,11 +99,12 @@ Windows 安装包输出到 `src-tauri/target/release/bundle/nsis` 和 `src-tauri
 Agent 默认可以：
 
 - 创建、修改和删除矩形、椭圆、菱形、文本、箭头、线条和自由笔迹
-- 读取画布中的元素、文字、选区和视口
+- 读取当前视口和选中元素的摘要，不上传整张画布截图
 - 根据自然语言生成流程图或其他结构化图形
 - 移动元素、清空画布并连续完成多步任务
 - 对选中的多个元素执行对齐、分布和排序
 - 创建或更新箭头端点绑定，移动目标元素时保持连接
+- 在明确要求下读取视口或选中的图片元素
 - 在聊天记录中展示 AI 的反馈和错误
 - 将 AI 修改按操作组预览，支持接受、拒绝、撤销和失败后重新请求
 
@@ -110,10 +113,14 @@ Excalidraw 本身还提供选择、缩放、撤销、重做、图片、导出和
 ## 项目结构
 
 ```text
-client/   浏览器端 React 组件、画布和聊天 UI
-worker/   Cloudflare Worker、模型请求和 SSE 流
-shared/   客户端与 Worker 共用的画布协议
-public/   静态资源
+client/     浏览器端 React 组件、画布和聊天 UI
+worker/     Cloudflare Worker、模型请求和 SSE 流
+shared/     客户端与 Worker 共用的画布协议
+src-tauri/  Tauri 2 Windows 桌面壳
+tests/      单元测试与 Worker 边界测试
+scripts/    浏览器 / Tauri / 安装器 smoke 脚本
+docs/adr/   本地 AI 与 macOS/Linux 评估
+public/     静态资源
 ```
 
 ## 画布操作协议
@@ -132,6 +139,8 @@ Agent 通过 JSON 返回以下操作：
 协议定义位于 `shared/canvas.ts`。要扩展新的元素或操作，先更新协议，再同步修改 Worker 校验和客户端执行逻辑。
 
 AI 修改流程会先在内存中完整计算操作组，预览确认后才一次写入画布。操作历史会保留最近的 AI 修改；撤销时只恢复仍未被用户改动的 AI 元素，因此不会覆盖之后的正常编辑。模型 JSON 只自动修复代码围栏和尾逗号等安全格式问题，未知字段、未知操作、非法数字、无效元素和不支持的内容会在执行前拒绝。
+
+画布本地保存会防抖写入 `localStorage`。发给 AI 的上下文限于当前视口、选中元素和有界对话历史；图片二进制数据只在用户明确要求分析图片时附带。
 
 ## 检查和构建
 
